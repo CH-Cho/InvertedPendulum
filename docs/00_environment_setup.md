@@ -54,3 +54,20 @@ arm-none-eabi-objcopy -O binary Debug/firmware.elf Debug/firmware.bin
 cp Debug/firmware.bin /Volumes/NOD_G474RE/
 ```
 복사가 완료되면 보드 상단 LD1(빨강/초록) LED가 깜빡인 후 보드가 자동으로 재부팅되어 코드가 실행됩니다.
+
+---
+
+## 4. 공식 기술 문서 및 레퍼런스 가이드 (Documentation)
+
+STM32G474RE 펌웨어 및 제어기 개발에 반드시 필요한 ST 공식 기술 문서입니다.  
+ST 웹사이트의 보안 방화벽 정책으로 인해 아래 링크를 클릭하여 브라우저에서 직접 다운로드하시는 것을 권장합니다.
+
+| 문서 번호 | 문서명 | 크기 | 핵심 역할 및 참조 내용 | 공식 다운로드 링크 |
+| :---: | :--- | :---: | :--- | :---: |
+| **RM0440** | **Reference Manual** | ~18 MB | **[필수] 전체 레지스터 맵 및 주변장치 하드웨어 제어 원리 총망라**<br>• 메모리 맵(Memory Map), RCC 클럭 트리, GPIO 레지스터 구조<br>• EXTI 인터럽트 라우팅, 범용 타이머(TIM), 고해상도 타이머(HRTIM)<br>• USART 시리얼 통신, 12-bit ADC, CORDIC/FMAC 가속기 등 | [📥 RM0440 PDF 다운로드](https://www.st.com/resource/en/reference_manual/rm0440-stm32g4-series-advanced-armbased-32bit-mcus-stmicroelectronics.pdf) |
+| **UM2505** | **User Manual** | ~2.5 MB | **[필수] NUCLEO-G474RE (MB1367) 보드 하드웨어 구성 가이드**<br>• 보드 온보드 LED(LD2: `PA5`), 유저 버튼(B1: `PC13`) 연결 회로<br>• ST-LINK/V3E 가상 COM 포트(USART2: `PA2`/`PA3`) 점퍼 연결<br>• 전원 공급 모드(5V_STLK, USB_PWR) 및 CN4 SWD 디버그 점퍼 설정 | [📥 UM2505 PDF 다운로드](https://www.st.com/resource/en/user_manual/um2505-stm32g4-nucleo64-boards-mb1367-stmicroelectronics.pdf) |
+| **DS12288** | **Datasheet** | ~5 MB | **STM32G474xB/xC/xE MCU 전기적 사양서**<br>• LQFP64 패키지 핀아웃(Pinout) 다이어그램<br>• 핀별 대체 기능(Alternate Function, AF0~AF15) 매핑 테이블<br>• 전기적 특성(Operating Voltage 1.71~3.6V, 최대 클럭 170MHz, 타이머 주파수) | [📥 DS12288 PDF 다운로드](https://www.st.com/resource/en/datasheet/stm32g474re.pdf) |
+| **PM0214** | **Programming Manual** | ~2 MB | **STM32 Cortex®-M4 프로그래밍 가이드**<br>• Armv7-M 아키텍처 및 Thumb-2 명령어 셋<br>• NVIC(Nested Vectored Interrupt Controller) 인터럽트 우선순위 및 제어<br>• SysTick 시스템 타이머, FPU(Floating Point Unit) 레지스터 구조 | [📥 PM0214 PDF 다운로드](https://www.st.com/resource/en/programming_manual/pm0214-stm32-cortexm4-mcus-and-mpus-programming-manual-stmicroelectronics.pdf) |
+
+### 💡 로컬 보관 안내
+다운로드하신 PDF 파일들은 프로젝트 내 [`docs/manuals/`](docs/manuals/) 폴더에 보관하시면 학습 및 개발 중에 편리하게 열어보실 수 있습니다.
