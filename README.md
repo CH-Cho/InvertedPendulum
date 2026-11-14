@@ -22,23 +22,23 @@ NUCLEO-G474RE 보드를 기반으로 하드웨어 저수준 제어부터 도립�
 
 모든 학습 단계는 원리 분석, 하드웨어 레지스터/드라이버 구현, 실습 검증 가이드가 `docs/` 디렉토리에 마크다운으로 상세히 기록됩니다.
 
-| 단계 | 토픽 | 핵심 내용 | 문서 링크 | 상태 |
-| :---: | :--- | :--- | :--- | :---: |
-| **00** | **Environment Setup** | STM32CubeIDE 2.0 설치 및 ST-LINK 연결/트러블슈팅 | [docs/00_environment_setup.md](docs/00_environment_setup.md) | ✅ 완료 |
-| **01** | **Bare-metal LED Blink** | RCC 클럭 제어, GPIO MODER/ODR 레지스터 직접 제어 | [docs/01_baremetal_blink.md](docs/01_baremetal_blink.md) | ✅ 완료 |
-| **02** | **GPIO EXTI** | NVIC 및 EXTI 컨트롤러를 활용한 하드웨어 외부 인터럽트 (버튼 입력) | [docs/02_gpio_exti.md](docs/02_gpio_exti.md) | 🔄 진행중 |
-| **03** | **UART Printf** | USART2 VCP 시리얼 통신 및 `printf` 리디렉션을 통한 모니터링 | [docs/03_uart_printf.md](docs/03_uart_printf.md) | ⏳ 예정 |
-| **04** | **Timer TimeBase** | 1ms(1kHz) 고정 주기 타이머 인터럽트를 통한 실시간 제어 루프 | [docs/04_timer_timebase.md](docs/04_timer_timebase.md) | ⏳ 예정 |
-| **05** | **Timer PWM** | DC/BLDC 모터 제어용 하드웨어 PWM 파형 생성 | [docs/05_timer_pwm.md](docs/05_timer_pwm.md) | ⏳ 예정 |
-| **06** | **Timer Encoder** | 진자 각도 및 카트 위치 측정을 위한 직교 엔코더(Quadrature) 디코딩 | [docs/06_timer_encoder.md](docs/06_timer_encoder.md) | ⏳ 예정 |
-| **07** | **Pendulum Control** | 도립진자 비선형 모델링, 선형화, PID 및 LQR 상태 피드백 제어 | [docs/07_pendulum_control.md](docs/07_pendulum_control.md) | ⏳ 예정 |
+| 단계 | 토픽 | 핵심 내용 | 문서 링크 | Linear Issue | 상태 |
+| :---: | :--- | :--- | :--- | :---: | :---: |
+| **00** | **Environment Setup** | STM32CubeIDE 2.0 설치 및 ST-LINK 연결/트러블슈팅 | [docs/00_environment_setup.md](docs/00_environment_setup.md) | [CH-5](https://linear.app/ch-cho/issue/CH-5) | ✅ 완료 |
+| **01** | **Bare-metal LED Blink** | RCC 클럭 제어, GPIO MODER/ODR 레지스터 직접 제어 | [docs/01_baremetal_blink.md](docs/01_baremetal_blink.md) | [CH-5](https://linear.app/ch-cho/issue/CH-5) | ✅ 완료 |
+| **02** | **GPIO EXTI** | NVIC 및 EXTI 컨트롤러를 활용한 하드웨어 외부 인터럽트 (버튼 입력) | [docs/02_gpio_exti.md](docs/02_gpio_exti.md) | [CH-6](https://linear.app/ch-cho/issue/CH-6) | 🔄 진행중 |
+| **03** | **UART Printf** | USART2 VCP 시리얼 통신 및 `printf` 리디렉션을 통한 모니터링 | [docs/03_uart_printf.md](docs/03_uart_printf.md) | [CH-7](https://linear.app/ch-cho/issue/CH-7) | ⏳ 예정 |
+| **04** | **Timer TimeBase** | 1ms(1kHz) 고정 주기 타이머 인터럽트를 통한 실시간 제어 루프 | [docs/04_timer_timebase.md](docs/04_timer_timebase.md) | [CH-8](https://linear.app/ch-cho/issue/CH-8) | ⏳ 예정 |
+| **05** | **Timer PWM** | DC/BLDC 모터 제어용 하드웨어 PWM 파형 생성 | [docs/05_timer_pwm.md](docs/05_timer_pwm.md) | [CH-9](https://linear.app/ch-cho/issue/CH-9) | ⏳ 예정 |
+| **06** | **Timer Encoder** | 진자 각도 및 카트 위치 측정을 위한 직교 엔코더(Quadrature) 디코딩 | [docs/06_timer_encoder.md](docs/06_timer_encoder.md) | [CH-10](https://linear.app/ch-cho/issue/CH-10) | ⏳ 예정 |
+| **07** | **Pendulum Control** | 도립진자 비선형 모델링, 선형화, PID 및 LQR 상태 피드백 제어 | [docs/07_pendulum_control.md](docs/07_pendulum_control.md) | [CH-11](https://linear.app/ch-cho/issue/CH-11) | ⏳ 예정 |
 
 ---
 
 ## 🛠 Project Management
 이 프로젝트의 이슈 추적 및 마일스톤 관리는 **[Linear](https://linear.app)**를 통해 체계적으로 관리됩니다.
+- **Linear Project**: [Inverted Pendulum (도립진자)](https://linear.app/ch-cho/project/inverted-pendulum-도립진자-6b3441480def)
 - **Team**: `CH Cho (CH)`
-- **Project**: `Inverted Pendulum`
 
 ---
 
