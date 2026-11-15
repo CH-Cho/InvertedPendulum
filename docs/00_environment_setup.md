@@ -21,7 +21,19 @@ ls -la /dev/cu.usbmodem*
 
 ---
 
-## 3. 핵심 트러블슈팅: ST-LINK GDB Server 통신 오류
+## 3. STM32CubeIDE 2.0 프로젝트 생성 Q&A
+
+### Q1. `File > New`에서 `STM32 Project`가 보이지 않고 `Empty Project`와 `CMake Project`만 보일 때
+- **원인**: 최신 STM32CubeIDE 2.0 메이저 업데이트에서 프로젝트 생성 마법사 구조가 개편되었습니다.
+- **해결책**: 목록에서 **`Empty Project` (또는 STM32CubeIDE Empty Project)**를 선택하고 Next를 누르면 타겟 MCU/Board Selector(NUCLEO-G474RE) 화면으로 바로 진입합니다.
+
+### Q2. `Help > Manage embedded software packages` 메뉴가 보이지 않을 때
+- **원인**: 해당 메뉴는 `.ioc` 파일(CubeMX GUI 설정 화면)이 열려 있는 상태에서만 상단 메뉴에 활성화됩니다.
+- **자동 다운로드**: STM32CubeIDE는 프로젝트를 생성할 때(`Finish` 클릭 시) 필요한 펌웨어 패키지(`STM32Cube_FW_G4`)가 로컬에 없으면 자동으로 다운로드 확인 팝업을 띄워 설치해 주므로, 사전에 수동 설치할 필요가 없습니다.
+
+---
+
+## 4. 핵심 트러블슈팅: ST-LINK GDB Server 통신 오류
 
 ### 증상 (Error Log)
 ```text
@@ -57,7 +69,7 @@ cp Debug/firmware.bin /Volumes/NOD_G474RE/
 
 ---
 
-## 4. 공식 기술 문서 및 레퍼런스 가이드 (Documentation)
+## 5. 공식 기술 문서 및 레퍼런스 가이드 (Documentation)
 
 STM32G474RE 펌웨어 및 제어기 개발에 반드시 필요한 ST 공식 기술 문서입니다.  
 ST 웹사이트의 보안 방화벽 정책으로 인해 아래 링크를 클릭하여 브라우저에서 직접 다운로드하시는 것을 권장합니다.
@@ -70,4 +82,4 @@ ST 웹사이트의 보안 방화벽 정책으로 인해 아래 링크를 클릭�
 | **PM0214** | **Programming Manual** | ~2 MB | **STM32 Cortex®-M4 프로그래밍 가이드**<br>• Armv7-M 아키텍처 및 Thumb-2 명령어 셋<br>• NVIC(Nested Vectored Interrupt Controller) 인터럽트 우선순위 및 제어<br>• SysTick 시스템 타이머, FPU(Floating Point Unit) 레지스터 구조 | [📥 PM0214 PDF 다운로드](https://www.st.com/resource/en/programming_manual/pm0214-stm32-cortexm4-mcus-and-mpus-programming-manual-stmicroelectronics.pdf) |
 
 ### 💡 로컬 보관 안내
-다운로드하신 PDF 파일들은 프로젝트 내 [`docs/manuals/`](docs/manuals/) 폴더에 보관하시면 학습 및 개발 중에 편리하게 열어보실 수 있습니다.
+다운로드하신 PDF 파일들은 프로젝트 내 [`docs/ST_manuals/`](ST_manuals/) 폴더에 안전하게 보관되어 있습니다.

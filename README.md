@@ -35,6 +35,12 @@ NUCLEO-G474RE 보드를 기반으로 하드웨어 저수준 제어부터 도립�
 
 ---
 
+## 🔬 Deep Dive & Technical Notes
+데이터시트 및 하드웨어 아키텍처 심층 분석 문서 목록입니다.
+- **[Stop 0 Mode & EXTI 상호작용 심층 분석](docs/deep_dive_stop0_low_power.md)**: Cortex-M4 Deep-sleep, Main Regulator, 자율 주변장치(Autonomous Peripheral) 동작 원리 및 펜딩 플래그(`EXTI_PR1`) 클리어 규칙
+
+---
+
 ## 🛠 Project Management
 이 프로젝트의 이슈 추적 및 마일스톤 관리는 **[Linear](https://linear.app)**를 통해 체계적으로 관리됩니다.
 - **Linear Project**: [Inverted Pendulum (도립진자)](https://linear.app/ch-cho/project/inverted-pendulum-도립진자-6b3441480def)
