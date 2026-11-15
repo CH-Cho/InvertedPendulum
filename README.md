@@ -26,8 +26,8 @@ NUCLEO-G474RE 보드를 기반으로 하드웨어 저수준 제어부터 도립�
 | :---: | :--- | :--- | :--- | :---: | :---: |
 | **00** | **Environment Setup** | STM32CubeIDE 2.0 설치 및 ST-LINK 연결/트러블슈팅 | [docs/00_environment_setup.md](docs/00_environment_setup.md) | [CH-5](https://linear.app/ch-cho/issue/CH-5) | ✅ 완료 |
 | **01** | **Bare-metal LED Blink** | RCC 클럭 제어, GPIO MODER/ODR 레지스터 직접 제어 | [docs/01_baremetal_blink.md](docs/01_baremetal_blink.md) | [CH-5](https://linear.app/ch-cho/issue/CH-5) | ✅ 완료 |
-| **02** | **GPIO EXTI** | NVIC 및 EXTI 컨트롤러를 활용한 하드웨어 외부 인터럽트 (버튼 입력) | [docs/02_gpio_exti.md](docs/02_gpio_exti.md) | [CH-6](https://linear.app/ch-cho/issue/CH-6) | 🔄 진행중 |
-| **03** | **UART Printf** | USART2 VCP 시리얼 통신 및 `printf` 리디렉션을 통한 모니터링 | [docs/03_uart_printf.md](docs/03_uart_printf.md) | [CH-7](https://linear.app/ch-cho/issue/CH-7) | ⏳ 예정 |
+| **02** | **GPIO EXTI** | NVIC 및 EXTI 컨트롤러를 활용한 하드웨어 외부 인터럽트 (버튼 입력) | [docs/02_gpio_exti.md](docs/02_gpio_exti.md) | [CH-6](https://linear.app/ch-cho/issue/CH-6) | ✅ 완료 |
+| **03** | **UART Printf** | USART2 VCP 시리얼 통신 및 `printf` 리디렉션을 통한 모니터링 | [docs/03_uart_printf.md](docs/03_uart_printf.md) | [CH-7](https://linear.app/ch-cho/issue/CH-7) | 🔄 진행중 |
 | **04** | **Timer TimeBase** | 1ms(1kHz) 고정 주기 타이머 인터럽트를 통한 실시간 제어 루프 | [docs/04_timer_timebase.md](docs/04_timer_timebase.md) | [CH-8](https://linear.app/ch-cho/issue/CH-8) | ⏳ 예정 |
 | **05** | **Timer PWM** | DC/BLDC 모터 제어용 하드웨어 PWM 파형 생성 | [docs/05_timer_pwm.md](docs/05_timer_pwm.md) | [CH-9](https://linear.app/ch-cho/issue/CH-9) | ⏳ 예정 |
 | **06** | **Timer Encoder** | 진자 각도 및 카트 위치 측정을 위한 직교 엔코더(Quadrature) 디코딩 | [docs/06_timer_encoder.md](docs/06_timer_encoder.md) | [CH-10](https://linear.app/ch-cho/issue/CH-10) | ⏳ 예정 |
