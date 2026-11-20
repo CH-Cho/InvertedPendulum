@@ -29,7 +29,7 @@ NUCLEO-G474RE 보드를 기반으로 하드웨어 저수준 제어부터 도립�
 | **02** | **GPIO EXTI** | NVIC 및 EXTI 컨트롤러를 활용한 하드웨어 외부 인터럽트 (버튼 입력) | [docs/02_gpio_exti.md](docs/02_gpio_exti.md) | [CH-6](https://linear.app/ch-cho/issue/CH-6) | ✅ 완료 |
 | **03** | **UART Printf** | USART2 VCP 시리얼 통신 및 `printf` 리디렉션을 통한 모니터링 | [docs/03_uart_printf.md](docs/03_uart_printf.md) | [CH-7](https://linear.app/ch-cho/issue/CH-7) | ✅ 완료 |
 | **04** | **Timer TimeBase** | 1ms(1kHz) 고정 주기 타이머 인터럽트를 통한 실시간 제어 루프 | [docs/04_timer_timebase.md](docs/04_timer_timebase.md) | [CH-8](https://linear.app/ch-cho/issue/CH-8) | ✅ 완료 |
-| **05** | **Timer PWM** | DC/BLDC 모터 제어용 하드웨어 PWM 파형 생성 | [docs/05_timer_pwm.md](docs/05_timer_pwm.md) | [CH-9](https://linear.app/ch-cho/issue/CH-9) | 🔄 진행중 |
+| **05** | **Timer PWM** | DC/BLDC 모터 제어용 하드웨어 PWM 생성 (05-1 완료: TIM2+버튼, 05-2: UART 원격 제어) | [docs/05_timer_pwm.md](docs/05_timer_pwm.md) | [CH-9](https://linear.app/ch-cho/issue/CH-9) | 🔄 진행중 (05-1 완료) |
 | **06** | **Timer Encoder** | 진자 각도 및 카트 위치 측정을 위한 직교 엔코더(Quadrature) 디코딩 | [docs/06_timer_encoder.md](docs/06_timer_encoder.md) | [CH-10](https://linear.app/ch-cho/issue/CH-10) | ⏳ 예정 |
 | **07** | **Pendulum Control** | 도립진자 비선형 모델링, 선형화, PID 및 LQR 상태 피드백 제어 | [docs/07_pendulum_control.md](docs/07_pendulum_control.md) | [CH-11](https://linear.app/ch-cho/issue/CH-11) | ⏳ 예정 |
 
