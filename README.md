@@ -82,6 +82,7 @@ InvertedPendulum/
 │   ├── 03_uart_printf.md
 │   ├── 04_timer_timebase.md
 │   ├── 05_timer_pwm.md                  # Step 05-1 (1kHz) + Step 05-2 (20kHz & DRV8876)
+│   ├── 06_timer_encoder.md              # Step 06 (TIM3 4x 엔코더, ADC1 각도, Soft Limit)
 │   ├── deep_dive_stop0_low_power.md
 │   ├── images/                          # 검증 완료된 회로도 및 실물/데이터시트 핀맵
 │   └── ST_manuals/                      # STM32G4 공식 매뉴얼 (RM0440, DS12288, UM2505 등)
