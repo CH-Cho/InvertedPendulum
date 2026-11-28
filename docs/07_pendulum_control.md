@@ -116,6 +116,29 @@ print("Poles =", np.round(np.linalg.eigvals(A - B @ K), 3))
    - **`c` 키**를 눌러 무장(`CTRL_ARMED`)하면 진자가 내려가 있는 동안에는 모터가 **완전 정지**합니다.
    - 손으로 진자를 들어 **12시 ±8° 이내(`|x| < 100 mm`)에 `100 ms` 유지**하면 자동으로 `CTRL_BALANCING`이 시작되고, **`|θ| > 28°` 낙하 또는 Soft Limit (`±150 mm`) 도달 시 즉시 차단** 후 `ARMED`로 복귀합니다.
 
+### 4.1 핵심 트러블슈팅: 플래싱 후 무응답 — `TIM6` 인터럽트 vs `ADC1` 초기화 순서 충돌
+
+실제 보드 개발 중 **ST-LINK 플래싱(`Download verified successfully`)은 정상 완료되었는데 UART 시리얼 출력이 전혀 나오지 않는 데드락 현상**을 겪었습니다. 원인은 **베어메탈 인터럽트 활성화 순서**였습니다.
+
+- **잘못된 순서 (데드락 유발)**:
+  1. `tim6_init()`을 먼저 호출해 1ms(`1 kHz`) 타이머 인터럽트를 활성화합니다.
+  2. 이어서 `adc1_pa1_init()`이 내부 레귤레이터 안정화(`ADVREGEN`)를 기다리려고 `TIM6` 틱 기반 `delay_ms(2)`로 **2ms 동안 대기**합니다.
+  3. 대기 중 `t = 1ms` 시점에 `TIM6_DACUNDER_IRQHandler`가 먼저 진입하고, **아직 `ADEN = 0`이고 캘리브레이션(`ADCAL`)도 끝나지 않은 `ADC1_CR`에 `ADSTART = 1` 비트를 써버립니다.**
+  4. STM32G4 레퍼런스 매뉴얼(`RM0440`) 규칙상 `ADCAL`은 `ADEN = 0, ADSTART = 0`일 때만 동작하므로, `ADCAL` / `ADRDY` 대기 루프가 영원히 빠져나오지 못해 `print_menu()`까지 도달하지 못합니다.
+- **해결 원칙 (베어메탈 초기화 철칙)**:
+  1. **타이머/제어 인터럽트(`tim6_init()`)는 반드시 모든 센서(`UART`, `PWM`, `Encoder`, `ADC1`) 초기화가 100% 끝난 가장 마지막에 실행합니다.**
+  2. 인터럽트 활성화 전 대기(`ADVREGEN > 20µs`)는 `TIM6`에 의존하는 `delay_ms()` 대신 독립적인 `nop` 루프를 사용하고, `ADCAL` / `ADRDY` 폴링에도 안전 타임아웃을 둡니다.
+
+```c
+// 올바른 초기화 순서 (main.c)
+fpu_enable();
+uart2_init();
+motor_driver_init();
+encoder_tim3_init();
+adc1_pa1_init();   // TIM6 시작 전 독립 대기(nop 루프)로 ADC 캘리브레이션·활성화 완료
+tim6_init();       // 모든 주변장치 준비 완료 후 마지막에 1kHz 제어 ISR 시작!
+```
+
 ---
 
 ## 5. 전체 소스 코드 (`firmware/G474RE_Blink/Src/main.c`)
