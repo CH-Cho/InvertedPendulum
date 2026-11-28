@@ -262,11 +262,11 @@ tim6_init();       // 모든 주변장치 준비 완료 후 마지막에 1kHz �
 #define DEFAULT_ANGLE_SIGN      (-1)
 
 // 제어기 안전 임계값 (12시 수직 근처에서 자동 무장, 낙하 시 즉시 차단)
-#define CTRL_ARM_ANGLE_DEG      8.0f    // |theta| < 8.0 deg 진입 시 밸런싱 시작
+#define CTRL_ARM_ANGLE_DEG      4.0f    // |theta| < 4.0 deg 진입 시 안정적 밸런싱 시작
 #define CTRL_ARM_POS_MM         100.0f  // |x| < 100.0 mm 안에서 시작
-#define CTRL_ARM_HOLD_MS        100U    // 수직 유지 100ms 확인 후 작동
+#define CTRL_ARM_HOLD_MS        200U    // 수직 유지 200ms 확인 후 작동
 #define CTRL_FALL_ANGLE_DEG     28.0f   // |theta| > 28.0 deg 시 낙하 차단
-#define DIFF_WIN_SIZE           10U     // 1kHz 루프 내 10ms 슬라이딩 차분 윈도우
+#define DIFF_WIN_SIZE           20U     // 1kHz 루프 내 20ms 슬라이딩 차분 윈도우
 
 typedef enum {
     HOME_IDLE = 0,
@@ -335,16 +335,16 @@ static float             s_th_hist[DIFF_WIN_SIZE];
 static uint8_t           s_hist_idx           = 0;
 static volatile uint8_t  s_hist_reset_req     = 1;
 
-// LQR / PD 제어 상태 및 튜닝 가능한 게인 (실물 밸런싱 로그 기반 K_th 우선 튜닝값)
+// LQR / PD 제어 상태 및 튜닝 가능한 게인 (저노이즈 필터 + 뱅뱅 방지 부드러운 튜닝값)
 // u = -(kx*x + kdx*dx + kth*th + kdth*dth),  x=[m, m/s, rad, rad/s], u in [-1, +1]
 static volatile ControlState   g_ctrl_state   = CTRL_IDLE;
 static volatile ControlMode    g_ctrl_mode    = MODE_LQR;
 static volatile TuneParamIndex g_tune_idx     = TUNE_KTH;
-static volatile float          g_k_x          = -1.200f;
-static volatile float          g_k_dx         = -2.800f;
-static volatile float          g_k_th         = -28.000f;
-static volatile float          g_k_dth        = -4.500f;
-static volatile float          g_deadzone_pct = 20.0f;
+static volatile float          g_k_x          = -1.000f;
+static volatile float          g_k_dx         = -2.200f;
+static volatile float          g_k_th         = -18.000f;
+static volatile float          g_k_dth        = -2.800f;
+static volatile float          g_deadzone_pct = 18.0f;
 static volatile float          g_last_u_cmd   = 0.0f;
 static volatile uint16_t       g_arm_hold_ms  = 0;
 static volatile uint8_t        g_fall_trip    = 0;
@@ -619,16 +619,16 @@ static void adc1_pa1_init(void)
     ADC1_SQR1  =  (2U << 6); // SQ1 = CH2 (PA1)
 }
 
-static uint16_t adc1_read_pa1_avg4(void)
+static uint16_t adc1_read_pa1_avg16(void)
 {
     uint32_t sum = 0U;
-    for (uint8_t i = 0U; i < 4U; i++) {
+    for (uint8_t i = 0U; i < 16U; i++) {
         uint32_t timeout = 2000U;
         ADC1_CR |= (1U << 2); // ADSTART
         while (!(ADC1_ISR & (1U << 2)) && (--timeout > 0U));
         sum += (uint16_t)(ADC1_DR & 0x0FFFU);
     }
-    return (uint16_t)(sum >> 2);
+    return (uint16_t)(sum >> 4);
 }
 
 /* ============================================================================
@@ -640,7 +640,7 @@ void TIM6_DACUNDER_IRQHandler(void)
     TIM6_SR &= ~(1U << 0);
     g_system_millis++;
 
-    // (1) 카트 위치(m) & 진자 각도(rad) 1kHz 동시 샘플링
+    // (1) 카트 위치(m) & 진자 각도(rad) 1kHz 동시 샘플링 + 각도 EMI 필터(alpha=0.25)
     uint16_t curr_cnt = (uint16_t)TIM3_CNT;
     int16_t  delta_1ms = (int16_t)(curr_cnt - s_prev_cnt_1ms);
     s_prev_cnt_1ms = curr_cnt;
@@ -649,30 +649,33 @@ void TIM6_DACUNDER_IRQHandler(void)
     float pos_m = ((float)g_cart_counts * RAIL_TRAVEL_M) / (float)g_enc_total_counts;
     float pos_mm = pos_m * 1000.0f;
 
-    uint16_t adc_raw = adc1_read_pa1_avg4();
+    uint16_t adc_raw = adc1_read_pa1_avg16();
     g_angle_adc_raw = adc_raw;
-    float theta_rad = (float)g_angle_sign * ((float)((int32_t)adc_raw - g_angle_zero_adc) * PI_F) / (float)g_pot_180_counts;
-    float theta_deg = theta_rad * RAD_TO_DEG_F;
+    float theta_raw = (float)g_angle_sign * ((float)((int32_t)adc_raw - g_angle_zero_adc) * PI_F) / (float)g_pot_180_counts;
 
-    // (2) 10ms 슬라이딩 윈도우 미분 + EMA LPF (alpha=0.15 @ 1kHz, fc ~ 28 Hz)
+    // (2) 20ms 슬라이딩 윈도우 미분 + EMA LPF (alpha=0.08 @ 1kHz, fc ~ 13.8 Hz)
+    float theta_rad;
     if (s_hist_reset_req) {
         s_hist_reset_req = 0U;
+        theta_rad = theta_raw;
         for (uint8_t i = 0U; i < DIFF_WIN_SIZE; i++) {
             s_pos_hist[i] = pos_m;
             s_th_hist[i]  = theta_rad;
         }
-        g_vel_mps  = 0.0f;
+        g_vel_mps    = 0.0f;
         g_dtheta_rps = 0.0f;
     } else {
-        float vel_raw = (pos_m - s_pos_hist[s_hist_idx]) * 100.0f;     // / 0.010s
-        float dth_raw = (theta_rad - s_th_hist[s_hist_idx]) * 100.0f;  // / 0.010s
+        theta_rad = 0.25f * theta_raw + 0.75f * g_theta_rad;
+        float vel_raw = (pos_m - s_pos_hist[s_hist_idx]) * 50.0f;     // / 0.020s
+        float dth_raw = (theta_rad - s_th_hist[s_hist_idx]) * 50.0f;  // / 0.020s
         s_pos_hist[s_hist_idx] = pos_m;
         s_th_hist[s_hist_idx]  = theta_rad;
         s_hist_idx = (uint8_t)((s_hist_idx + 1U) % DIFF_WIN_SIZE);
 
-        g_vel_mps    = 0.15f * vel_raw + 0.85f * g_vel_mps;
-        g_dtheta_rps = 0.15f * dth_raw + 0.85f * g_dtheta_rps;
+        g_vel_mps    = 0.08f * vel_raw + 0.92f * g_vel_mps;
+        g_dtheta_rps = 0.08f * dth_raw + 0.92f * g_dtheta_rps;
     }
+    float theta_deg = theta_rad * RAD_TO_DEG_F;
     g_pos_m     = pos_m;
     g_theta_rad = theta_rad;
 
@@ -779,7 +782,7 @@ static void print_menu(void)
     printf("  [Step 07 / CH-11] 1kHz LQR / PD Balancing Controller            \r\n");
     printf("  Rate    : 1kHz Control (TIM6) | 20kHz PWM (TIM2) | 5V FT (TIM3) \r\n");
     printf("------------------------------------------------------------------\r\n");
-    printf("  Balance : c = Arm/Disarm Balance (Lift <8deg to Auto-Start!)    \r\n");
+    printf("  Balance : c = Arm/Disarm Balance (Lift <4deg to Auto-Start!)    \r\n");
     printf("            m = Mode LQR <-> PD  | p = Flip Angle Sign (+/-)      \r\n");
     printf("            s / Space = EMERGENCY STOP (Always Immediate Cut)     \r\n");
     printf("  Tuning  : g = Select Gain (Kx/Kdx/Kth/Kdth/DZ) | +/- = Adjust   \r\n");
@@ -978,7 +981,7 @@ int main(void)
                     g_acal_state  = ACAL_IDLE;
                     g_arm_hold_ms = 0U;
                     g_ctrl_state  = CTRL_ARMED;
-                    printf("\r\n>>> [ARMED] 진자를 12시(+/-8 deg)로 세우면 %s 밸런싱이 시작됩니다!\r\n",
+                    printf("\r\n>>> [ARMED] 진자를 12시(+/-4 deg)로 세우면 %s 밸런싱이 시작됩니다!\r\n",
                            (g_ctrl_mode == MODE_LQR) ? "LQR" : "PD");
                 } else {
                     motor_stop();
