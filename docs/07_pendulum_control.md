@@ -904,8 +904,8 @@ int main(void)
         // (A) 인터럽트 안전/상태 전환 이벤트 출력
         if (g_fall_trip) {
             g_fall_trip = 0U;
-            printf("\r\n>>> [FALL CUTOFF] |Angle| > %.0f deg! Motor stopped -> ARMED.\r\n",
-                   (double)CTRL_FALL_ANGLE_DEG);
+            printf("\r\n>>> [FALL CUTOFF] |Angle| > %d deg! Motor stopped -> ARMED.\r\n",
+                   (int)CTRL_FALL_ANGLE_DEG);
         }
         if (g_soft_limit_trip) {
             g_soft_limit_trip = 0U;
