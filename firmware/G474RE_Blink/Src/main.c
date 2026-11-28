@@ -1,16 +1,15 @@
 /**
  ******************************************************************************
  * @file           : main.c
- * @brief          : [CH-10 / Step 06] TIM3 4체배 직교 엔코더 & ADC1 진자 각도계
- *                   + 가이드 위치 초기화(오른쪽/왼쪽 끝 -> 자동 중앙 복귀)
- *                   + 진자 2점 각도 캘리브레이션(6시/12시) 및 6시 간편 영점
+ * @brief          : [CH-11 / Step 07] 도립진자 1kHz 실시간 LQR & PD 밸런싱 제어기
+ *                   + 가이드 위치 초기화(h), 진자 2점 교정(a, d), 데드존 보상 & 실시간 튜닝
  *                   - PA0 (A0) / PA5 : TIM2_CH1 20kHz PWM (DRV8876 EN / LD2 LED)
- *                   - PB0 (A3)       : GPIO Output 모터 방향 (PH: 1=오른쪽 f, 0=왼쪽 b)
+ *                   - PB0 (A3)       : GPIO Output 모터 방향 (PH: 1=오른쪽 +, 0=왼쪽 -)
  *                   - PC6 (CN10-4)   : TIM3_CH1 (AF2, 5V FT) 엔코더 A상
  *                   - PC7 (D9)       : TIM3_CH2 (AF2, 5V FT) 엔코더 B상
  *                   - PA1 (A1)       : ADC1_IN2 진자 포텐쇼미터(WDD35D4-5K) 각도
- *                   - USART2 (VCP)   : 115200 bps 텔레메트리 및 키보드 조종
- *                   - TIM6           : 1ms 타임베이스 (Soft Limit & 100Hz 샘플링)
+ *                   - USART2 (VCP)   : 115200 bps 텔레메트리 및 실시간 게인 튜닝
+ *                   - TIM6           : 1ms(1kHz) 결정론적 LQR/PD 제어 + Soft Limit 루프
  * @repository     : https://github.com/CH-Cho/InvertedPendulum
  ******************************************************************************
  */
@@ -21,7 +20,6 @@
 /* ============================================================================
  * 1. STM32G474RE 베어메탈 레지스터 정의 (RM0440 기준)
  * ========================================================================== */
-// Cortex-M4 Core (FPU 접근 제어)
 #define SCB_CPACR           (*(volatile uint32_t *)0xE000ED88U)
 
 // RCC
@@ -75,7 +73,7 @@
 #define TIM3_PSC            (*(volatile uint32_t *)(TIM3_BASE + 0x28U))
 #define TIM3_ARR            (*(volatile uint32_t *)(TIM3_BASE + 0x2CU))
 
-// TIM6 (1ms System Tick)
+// TIM6 (1ms = 1kHz 제어 루프 타임베이스)
 #define TIM6_BASE           0x40001000U
 #define TIM6_CR1            (*(volatile uint32_t *)(TIM6_BASE + 0x00U))
 #define TIM6_DIER           (*(volatile uint32_t *)(TIM6_BASE + 0x0CU))
@@ -94,22 +92,35 @@
 #define ADC12_CCR           (*(volatile uint32_t *)0x50000308U)
 
 /* ============================================================================
- * 2. 하드웨어 캘리브레이션 상수 및 전역 상태 변수
+ * 2. 하드웨어 상수, 제어 파라미터 및 전역 상태
  * ========================================================================== */
-#define PWM_ARR_MAX             799U    // 16MHz / (0+1) / (799+1) = 20,000 Hz (20kHz)
+#define PI_F                    3.14159265f
+#define RAD_TO_DEG_F            57.2957795f
+#define DEG_TO_RAD_F            0.01745329f
 
-// IP570 카트 엔코더 기본 실측 교정치 (호밍 마법사 'h' 실행 시 자동 갱신됨)
+#define PWM_ARR_MAX             799U    // 16MHz / (0+1) / (799+1) = 20,000 Hz (20kHz)
+#define PWM_MAX_PCT             95.0f
+
+// IP570 물리 기구부 캘리브레이션 상수
+#define RAIL_TRAVEL_M           0.385f
 #define RAIL_TRAVEL_MM          385
 #define DEFAULT_TOTAL_COUNTS    6279
-#define SOFT_LIMIT_MM           150     // 중앙 영점 기준 ±150.0 mm 소프트웨어 리미트
-#define HOME_CENTER_BAND_CNT    50      // 자동 중앙 복귀 허용 오차 (±50 counts ≈ ±3.0 mm)
-#define HOME_CENTER_TIMEOUT_MS  4000U   // 자동 중앙 복귀 안전 타임아웃 (4초)
+#define SOFT_LIMIT_MM           150.0f
+#define HOME_CENTER_BAND_CNT    50
+#define HOME_CENTER_TIMEOUT_MS  4000U
 
-// WDD35D4-5K 포텐쇼미터 기본 실측 교정치 (각도 마법사 'a' 실행 시 자동 갱신됨)
+// WDD35D4-5K 각도 센서 상수 (관성 로그 기반: CCW=ADC증가 -> 오른쪽 기울임=+ 기준 ANGLE_SIGN=-1)
 #define POT_DEFAULT_DOWN        1024
 #define POT_DEFAULT_UPRIGHT     3140
 #define POT_DEFAULT_180_COUNTS  2116
-#define ANGLE_SIGN              1       // 오른쪽 기울임 시 부호 반전이 필요하면 -1로 변경
+#define DEFAULT_ANGLE_SIGN      (-1)
+
+// 제어기 안전 임계값 (12시 수직 근처에서 자동 무장, 낙하 시 즉시 차단)
+#define CTRL_ARM_ANGLE_DEG      8.0f    // |theta| < 8.0 deg 진입 시 밸런싱 시작
+#define CTRL_ARM_POS_MM         100.0f  // |x| < 100.0 mm 안에서 시작
+#define CTRL_ARM_HOLD_MS        100U    // 수직 유지 100ms 확인 후 작동
+#define CTRL_FALL_ANGLE_DEG     28.0f   // |theta| > 28.0 deg 시 낙하 차단
+#define DIFF_WIN_SIZE           10U     // 1kHz 루프 내 10ms 슬라이딩 차분 윈도우
 
 typedef enum {
     HOME_IDLE = 0,
@@ -124,52 +135,94 @@ typedef enum {
     ACAL_WAIT_UP
 } AngleCalState;
 
-static volatile uint32_t g_system_millis      = 0;
-static volatile uint8_t  g_tick_10ms          = 0;
+typedef enum {
+    CTRL_IDLE = 0,      // 수동 대기 (키보드 킥/초기화 가능)
+    CTRL_ARMED,         // 무장 대기 (12시 ±8 deg 세우면 자동 밸런싱 시작)
+    CTRL_BALANCING      // 1kHz 능동 밸런싱 동작 중
+} ControlState;
 
-// 모터 상태 및 안전 제어 변수
-static volatile uint32_t g_motor_stop_at      = 0;
-static volatile uint8_t  g_motor_running      = 0;
-static volatile uint8_t  g_test_duty_pct      = 50; // IP570 기동 마찰력 극복 테스트용 기본 50%
-static volatile uint8_t  g_motor_dir          = 1;  // 1: RIGHT(FWD), 0: LEFT(REV)
-static volatile uint8_t  g_soft_limit_on      = 1;  // 1: ±150mm Soft Limit 활성화
-static volatile uint8_t  g_soft_limit_trip    = 0;
+typedef enum {
+    MODE_LQR = 0,       // 4-상태 LQR: u = -(kx*x + kdx*dx + kth*th + kdth*dth)
+    MODE_PD             // 비교 학습용 각도 PD: u = -(kth*th + kdth*dth)
+} ControlMode;
+
+typedef enum {
+    TUNE_KX = 0,
+    TUNE_KDX,
+    TUNE_KTH,
+    TUNE_KDTH,
+    TUNE_DEADZONE,
+    TUNE_COUNT
+} TuneParamIndex;
+
+// 시스템 틱 및 UART 명령
+static volatile uint32_t g_system_millis      = 0;
 static volatile uint8_t  g_rx_cmd             = 0;
 
-// 카트 엔코더(TIM3) 확장 상태 및 동적 캘리브레이션 변수
+// 모터 상태 및 수동 킥 제어
+static volatile uint32_t g_motor_stop_at      = 0;
+static volatile uint8_t  g_kick_active        = 0;
+static volatile uint8_t  g_test_duty_pct      = 50;
+static volatile uint8_t  g_motor_dir          = 1;
+static volatile uint8_t  g_soft_limit_on      = 1;
+static volatile uint8_t  g_soft_limit_trip    = 0;
+
+// 카트 엔코더(TIM3) 상태 및 10ms 슬라이딩 미분 버퍼
 static volatile int8_t   g_enc_sign           = 1;
 static volatile int32_t  g_enc_total_counts   = DEFAULT_TOTAL_COUNTS;
-static volatile int32_t  g_cart_counts        = 0;  // 중앙 0 기준 32-bit 확장 카운트
-static volatile int32_t  g_cart_pos_mm_x10    = 0;  // 0.1 mm 단위 위치
-static volatile int32_t  g_cart_vel_mms_x10   = 0;  // 0.1 mm/s 단위 LPF 필터링 속도
+static volatile int32_t  g_cart_counts        = 0;
 static volatile uint16_t s_prev_cnt_1ms       = 0;
-static volatile int32_t  s_prev_counts_10ms   = 0;
-static volatile int32_t  s_cart_vel_q4        = 0;
+static volatile float    g_pos_m              = 0.0f;
+static volatile float    g_vel_mps            = 0.0f;
+static float             s_pos_hist[DIFF_WIN_SIZE];
 
-// 카트 호밍 마법사 상태 변수
-static CartHomeState     g_home_state         = HOME_IDLE;
+// 진자 각도계(ADC1) 상태 및 10ms 슬라이딩 미분 버퍼
+static volatile int8_t   g_angle_sign         = DEFAULT_ANGLE_SIGN;
+static volatile uint16_t g_angle_down_adc     = POT_DEFAULT_DOWN;
+static volatile int32_t  g_angle_zero_adc     = POT_DEFAULT_UPRIGHT;
+static volatile int32_t  g_pot_180_counts     = POT_DEFAULT_180_COUNTS;
+static volatile int8_t   g_pot_up_dir_sign    = 1;
+static volatile uint16_t g_angle_adc_raw      = POT_DEFAULT_UPRIGHT;
+static volatile float    g_theta_rad          = 0.0f;
+static volatile float    g_dtheta_rps         = 0.0f;
+static float             s_th_hist[DIFF_WIN_SIZE];
+static uint8_t           s_hist_idx           = 0;
+static volatile uint8_t  s_hist_reset_req     = 1;
+
+// LQR / PD 제어 상태 및 튜닝 가능한 게인 (IP570 Python LQR 도출 초기값)
+// u = -(kx*x + kdx*dx + kth*th + kdth*dth),  x=[m, m/s, rad, rad/s], u in [-1, +1]
+static volatile ControlState   g_ctrl_state   = CTRL_IDLE;
+static volatile ControlMode    g_ctrl_mode    = MODE_LQR;
+static volatile TuneParamIndex g_tune_idx     = TUNE_KTH;
+static volatile float          g_k_x          = -3.873f;
+static volatile float          g_k_dx         = -6.411f;
+static volatile float          g_k_th         = -20.759f;
+static volatile float          g_k_dth        = -3.362f;
+static volatile float          g_deadzone_pct = 26.0f;
+static volatile float          g_last_u_cmd   = 0.0f;
+static volatile uint16_t       g_arm_hold_ms  = 0;
+static volatile uint8_t        g_fall_trip    = 0;
+
+// 텔레메트리 스냅샷 (1kHz ISR -> main 정수 출력)
+static volatile int32_t  g_telem_pos_mm_x10   = 0;
+static volatile int32_t  g_telem_vel_mms_x10  = 0;
+static volatile int32_t  g_telem_ang_cdeg     = 0;
+static volatile int32_t  g_telem_dth_x10      = 0;
+static volatile int32_t  g_telem_u_pct        = 0;
+
+// 호밍 & 각도 캘리브레이션 마법사 상태
+static volatile CartHomeState g_home_state    = HOME_IDLE;
 static int32_t           g_home_right_cnt     = 0;
 static int32_t           g_home_left_cnt      = 0;
 static uint32_t          g_home_center_start  = 0;
-
-// 진자 각도계(ADC1) 상태 및 2점 캘리브레이션 변수
 static AngleCalState     g_acal_state         = ACAL_IDLE;
-static uint16_t          g_angle_down_adc     = POT_DEFAULT_DOWN;
-static int32_t           g_angle_zero_adc     = POT_DEFAULT_UPRIGHT;
-static int32_t           g_pot_180_counts     = POT_DEFAULT_180_COUNTS;
-static int8_t            g_pot_up_dir_sign    = 1;  // +1: 12시가 6시보다 ADC 큼, -1: 작음
-static uint16_t          g_angle_adc_raw      = POT_DEFAULT_UPRIGHT;
-static int32_t           g_angle_cdeg         = 0;  // 0.01 deg (12시 = 0.00 deg)
-static int32_t           g_angle_vel_x10      = 0;  // 0.1 deg/s LPF 각속도
-static int32_t           g_prev_angle_cdeg    = 0;
-static int32_t           g_angle_vel_q4       = 0;
 
 /* ============================================================================
  * 3. 유틸리티 및 드라이버 초기화 함수
  * ========================================================================== */
 static void fpu_enable(void)
 {
-    // CubeIDE 기본 fpv4-sp-d16 설정에서 부동소수점 명령 실행 시 HardFault 방지
+    // CubeIDE fpv4-sp-d16 설정에서 1kHz ISR 및 main의 float 연산 HardFault 방지
     SCB_CPACR |= (0xFU << 20);
     __asm volatile ("dsb");
     __asm volatile ("isb");
@@ -214,6 +267,14 @@ static void print_fixed_2(int32_t val_x100)
     printf("%c%ld.%02ld", sign, (long)(abs_v / 100), (long)(abs_v % 100));
 }
 
+static void print_fixed_3(float val)
+{
+    int32_t scaled = (int32_t)(val * 1000.0f + ((val >= 0.0f) ? 0.5f : -0.5f));
+    char sign = (scaled < 0) ? '-' : '+';
+    int32_t abs_v = (scaled < 0) ? -scaled : scaled;
+    printf("%c%ld.%03ld", sign, (long)(abs_v / 1000), (long)(abs_v % 1000));
+}
+
 static void uart2_init(void)
 {
     RCC_AHB2ENR  |= (1U << 0);  // GPIOAEN
@@ -225,16 +286,16 @@ static void uart2_init(void)
     GPIOA_AFRL  |=  ((0x7U << (2 * 4)) | (0x7U << (3 * 4)));
 
     USART2_BRR = 139U; // 115200 bps @ 16MHz
-    USART2_CR1 = (1U << 0) | (1U << 2) | (1U << 3) | (1U << 5); // UE | RE | TE | RXNEIE
+    USART2_CR1 = (1U << 0) | (1U << 2) | (1U << 3) | (1U << 5);
 
-    NVIC_ISER1 = (1U << (38 - 32)); // IRQ 38 (USART2) 활성화
+    NVIC_ISER1 = (1U << (38 - 32)); // IRQ 38 (USART2)
 }
 
 static void tim6_init(void)
 {
     RCC_APB1ENR1 |= (1U << 4); // TIM6EN
-    TIM6_PSC = 15U;            // 16MHz / 16 = 1MHz (1us 주기)
-    TIM6_ARR = 999U;           // 1ms 주기 인터럽트 (1kHz)
+    TIM6_PSC = 15U;            // 16MHz / 16 = 1MHz
+    TIM6_ARR = 999U;           // 1ms = 1kHz 제어 루프
     TIM6_DIER |= (1U << 0);
     NVIC_ISER1 = (1U << (54 - 32)); // IRQ 54 (TIM6)
     TIM6_CR1 |= (1U << 0);
@@ -254,19 +315,32 @@ static void motor_driver_init(void)
     // PB0 (A3 -> DRV8876 PH) -> GPIO Output
     GPIOB_MODER &= ~(3U << (0 * 2));
     GPIOB_MODER |=  (1U << (0 * 2));
-    GPIOB_ODR   |=  (1U << 0); // 초기 방향 RIGHT (FWD)
+    GPIOB_ODR   |=  (1U << 0);
 
-    // TIM2 20kHz PWM 설정 (16MHz / 1 / 800 = 20,000 Hz)
+    // TIM2 20kHz PWM
     TIM2_PSC   = 0U;
     TIM2_ARR   = PWM_ARR_MAX;
-    TIM2_CCR1  = 0U; // 부팅 시 완전 정지!
-    TIM2_CCMR1 = (0x6U << 4) | (1U << 3); // PWM Mode 1 + Preload
-    TIM2_CCER  = (1U << 0);               // CH1 출력 Enable
-    TIM2_CR1   = (1U << 0);               // TIM2 시작
+    TIM2_CCR1  = 0U;
+    TIM2_CCMR1 = (0x6U << 4) | (1U << 3);
+    TIM2_CCER  = (1U << 0);
+    TIM2_CR1   = (1U << 0);
 }
 
-static void motor_drive(uint8_t dir, uint8_t duty_pct)
+static void motor_stop(void)
 {
+    TIM2_CCR1 = 0U;
+    g_kick_active = 0U;
+    g_last_u_cmd  = 0.0f;
+}
+
+static void motor_drive_pct(uint8_t dir, float duty_pct)
+{
+    if (duty_pct <= 0.0f) {
+        TIM2_CCR1 = 0U;
+        return;
+    }
+    if (duty_pct > PWM_MAX_PCT) duty_pct = PWM_MAX_PCT;
+
     g_motor_dir = dir ? 1U : 0U;
     if (g_motor_dir) {
         GPIOB_ODR |= (1U << 0);
@@ -274,42 +348,58 @@ static void motor_drive(uint8_t dir, uint8_t duty_pct)
         GPIOB_ODR &= ~(1U << 0);
     }
 
-    uint32_t ccr = ((PWM_ARR_MAX + 1U) * duty_pct) / 100U;
+    uint32_t ccr = (uint32_t)(((float)(PWM_ARR_MAX + 1U) * duty_pct) / 100.0f + 0.5f);
     if (ccr > PWM_ARR_MAX) ccr = PWM_ARR_MAX;
     TIM2_CCR1 = ccr;
 }
 
-static void motor_stop(void)
+// 정규화 제어 입력 u in [-1.0, +1.0] -> 정지 마찰력(Deadzone) 보상 PWM 매핑
+static void motor_apply_control(float u)
 {
-    TIM2_CCR1 = 0U;
-    g_motor_running = 0U;
+    if (u > 1.0f)  u = 1.0f;
+    if (u < -1.0f) u = -1.0f;
+    g_last_u_cmd = u;
+
+    float abs_u = (u >= 0.0f) ? u : -u;
+    if (abs_u < 0.015f) {
+        TIM2_CCR1 = 0U;
+        g_telem_u_pct = 0;
+        return;
+    }
+
+    uint8_t dir = (u >= 0.0f) ? 1U : 0U;
+    float dz = g_deadzone_pct;
+    float duty = dz + abs_u * (PWM_MAX_PCT - dz);
+    motor_drive_pct(dir, duty);
+
+    int32_t signed_duty = (int32_t)(duty + 0.5f);
+    g_telem_u_pct = dir ? signed_duty : -signed_duty;
 }
 
-static uint8_t is_direction_blocked_by_limit(uint8_t dir)
+static uint8_t is_direction_blocked_by_limit(uint8_t dir, float pos_mm)
 {
     if (!g_soft_limit_on) return 0U;
-    int32_t limit_x10 = SOFT_LIMIT_MM * 10;
-    if (dir && (g_cart_pos_mm_x10 >= limit_x10))  return 1U;
-    if (!dir && (g_cart_pos_mm_x10 <= -limit_x10)) return 1U;
+    if (dir  && (pos_mm >= SOFT_LIMIT_MM))  return 1U;
+    if (!dir && (pos_mm <= -SOFT_LIMIT_MM)) return 1U;
     return 0U;
 }
 
 static void motor_kick(uint8_t dir, uint8_t duty_pct, uint32_t duration_ms)
 {
     uint8_t target_dir = dir ? 1U : 0U;
-    if (is_direction_blocked_by_limit(target_dir)) {
+    float pos_mm = g_pos_m * 1000.0f;
+    if (is_direction_blocked_by_limit(target_dir, pos_mm)) {
         motor_stop();
         g_soft_limit_trip = 1U;
-        printf("\r\n>>> [SOFT LIMIT] Blocked %s! Pos=",
-               target_dir ? "RIGHT" : "LEFT");
-        print_fixed_1(g_cart_pos_mm_x10);
-        printf(" mm (Limit +/-%d mm)\r\n", SOFT_LIMIT_MM);
+        printf("\r\n>>> [SOFT LIMIT] Blocked %s! Pos=", target_dir ? "RIGHT" : "LEFT");
+        print_fixed_1(g_telem_pos_mm_x10);
+        printf(" mm (Limit +/-%d mm)\r\n", (int)SOFT_LIMIT_MM);
         return;
     }
 
-    motor_drive(target_dir, duty_pct);
+    motor_drive_pct(target_dir, (float)duty_pct);
     g_motor_stop_at = g_system_millis + duration_ms;
-    g_motor_running = 1U;
+    g_kick_active   = 1U;
 }
 
 static void encoder_tim3_init(void)
@@ -317,7 +407,6 @@ static void encoder_tim3_init(void)
     RCC_AHB2ENR  |= (1U << 2); // GPIOCEN
     RCC_APB1ENR1 |= (1U << 1); // TIM3EN
 
-    // PC6 (CN10-4, TIM3_CH1) & PC7 (D9, TIM3_CH2) -> AF2, Pull-Up/Down 없음 (5V FT 보호)
     GPIOC_MODER &= ~((3U << (6 * 2)) | (3U << (7 * 2)));
     GPIOC_MODER |=  ((2U << (6 * 2)) | (2U << (7 * 2)));
     GPIOC_PUPDR &= ~((3U << (6 * 2)) | (3U << (7 * 2))); // 00: No Pull-Up/Down (5V FT 필수)
@@ -326,17 +415,10 @@ static void encoder_tim3_init(void)
 
     TIM3_CR1   = 0U;
     TIM3_PSC   = 0U;
-    TIM3_ARR   = 0xFFFFU; // 16-bit 전체 범위 자유 회전 카운트
-
-    // TI1/TI2 입력 매핑(CC1S=01, CC2S=01) + 디지털 노이즈 필터(IC1F=6, IC2F=6)
+    TIM3_ARR   = 0xFFFFU;
     TIM3_CCMR1 = (1U << 0) | (6U << 4) | (1U << 8) | (6U << 12);
-
-    // CC1P=1: TI1 극성 반전 -> 오른쪽(f, PH=1) 이동 시 카운트 양수(+) 증가 기준
-    TIM3_CCER  = (1U << 0) | (1U << 1) | (1U << 4);
-
-    // SMS=011 (Mode 3): 4체배 직교 인코더 모드
-    TIM3_SMCR  = 3U;
-
+    TIM3_CCER  = (1U << 0) | (1U << 1) | (1U << 4); // CC1P=1: 오른쪽(f) = +
+    TIM3_SMCR  = 3U;                                // 4체배 직교 인코더
     TIM3_CNT   = 0U;
     TIM3_CR1   = (1U << 0);
 }
@@ -347,20 +429,16 @@ static void encoder_set_counts_atomic(int32_t new_counts, int32_t new_total_coun
     if (new_total_counts > 0) {
         g_enc_total_counts = new_total_counts;
     }
-    g_enc_sign         = new_sign;
-    g_cart_counts      = new_counts;
-    s_prev_cnt_1ms     = (uint16_t)TIM3_CNT;
-    s_prev_counts_10ms = new_counts;
-    g_cart_pos_mm_x10  = (g_cart_counts * (RAIL_TRAVEL_MM * 10)) / g_enc_total_counts;
-    s_cart_vel_q4      = 0;
-    g_cart_vel_mms_x10 = 0;
-    g_soft_limit_trip  = 0U;
+    g_enc_sign        = new_sign;
+    g_cart_counts     = new_counts;
+    s_prev_cnt_1ms    = (uint16_t)TIM3_CNT;
+    g_pos_m           = ((float)g_cart_counts * RAIL_TRAVEL_M) / (float)g_enc_total_counts;
+    g_vel_mps         = 0.0f;
+    g_telem_pos_mm_x10 = (int32_t)(g_pos_m * 10000.0f);
+    g_telem_vel_mms_x10 = 0;
+    s_hist_reset_req  = 1U;
+    g_soft_limit_trip = 0U;
     __asm volatile ("cpsie i");
-}
-
-static void encoder_zero(void)
-{
-    encoder_set_counts_atomic(0, g_enc_total_counts, g_enc_sign);
 }
 
 static void adc1_pa1_init(void)
@@ -371,7 +449,7 @@ static void adc1_pa1_init(void)
     GPIOA_PUPDR &= ~(3U << (1 * 2));
 
     ADC12_CCR &= ~(3U << 16);
-    ADC12_CCR |=  (1U << 16); // HCLK/1 동기 클록 (16MHz)
+    ADC12_CCR |=  (1U << 16); // HCLK/1 (16MHz)
 
     ADC1_CR &= ~(1U << 29); // DEEPPWD = 0
     ADC1_CR |=  (1U << 28); // ADVREGEN = 1
@@ -382,120 +460,207 @@ static void adc1_pa1_init(void)
     while (ADC1_CR & (1U << 31));
 
     ADC1_ISR = (1U << 0);
-    ADC1_CR |= (1U << 0); // ADEN = 1
+    ADC1_CR |= (1U << 0);   // ADEN = 1
     while (!(ADC1_ISR & (1U << 0)));
 
     ADC1_CFGR  = 0U;
     ADC1_SMPR1 &= ~(7U << 6);
-    ADC1_SMPR1 |=  (4U << 6); // SMP2 = 100 (47.5 cycles)
+    ADC1_SMPR1 |=  (4U << 6); // SMP2 = 47.5 cycles (~3us)
     ADC1_SQR1  =  (2U << 6); // SQ1 = CH2 (PA1)
 }
 
-static uint16_t adc1_read_pa1_single(void)
-{
-    uint32_t timeout = 10000U;
-    ADC1_CR |= (1U << 2);
-    while (!(ADC1_ISR & (1U << 2)) && (--timeout > 0U));
-    return (uint16_t)(ADC1_DR & 0x0FFFU);
-}
-
-static uint16_t adc1_read_pa1_avg(void)
+static uint16_t adc1_read_pa1_avg4(void)
 {
     uint32_t sum = 0U;
-    for (uint8_t i = 0U; i < 8U; i++) {
-        sum += adc1_read_pa1_single();
+    for (uint8_t i = 0U; i < 4U; i++) {
+        uint32_t timeout = 2000U;
+        ADC1_CR |= (1U << 2); // ADSTART
+        while (!(ADC1_ISR & (1U << 2)) && (--timeout > 0U));
+        sum += (uint16_t)(ADC1_DR & 0x0FFFU);
     }
-    return (uint16_t)(sum >> 3);
-}
-
-static int32_t angle_adc_to_cdeg(uint16_t adc_raw)
-{
-    return ANGLE_SIGN * (((int32_t)adc_raw - g_angle_zero_adc) * 18000) / g_pot_180_counts;
-}
-
-static void angle_reseed_filter(uint16_t current_adc)
-{
-    g_angle_adc_raw   = current_adc;
-    g_angle_cdeg      = angle_adc_to_cdeg(current_adc);
-    g_prev_angle_cdeg = g_angle_cdeg;
-    g_angle_vel_q4    = 0;
-    g_angle_vel_x10   = 0;
+    return (uint16_t)(sum >> 2);
 }
 
 /* ============================================================================
- * 4. 인터럽트 핸들러
+ * 4. 1kHz 실시간 센서 추정 & LQR/PD 밸런싱 제어 인터럽트
  * ========================================================================== */
 void TIM6_DACUNDER_IRQHandler(void)
 {
-    static uint8_t s_div_10ms = 0;
+    if (!(TIM6_SR & (1U << 0))) return;
+    TIM6_SR &= ~(1U << 0);
+    g_system_millis++;
 
-    if (TIM6_SR & (1U << 0)) {
-        TIM6_SR &= ~(1U << 0);
-        g_system_millis++;
+    // (1) 카트 위치(m) & 진자 각도(rad) 1kHz 동시 샘플링
+    uint16_t curr_cnt = (uint16_t)TIM3_CNT;
+    int16_t  delta_1ms = (int16_t)(curr_cnt - s_prev_cnt_1ms);
+    s_prev_cnt_1ms = curr_cnt;
+    g_cart_counts += (int32_t)g_enc_sign * (int32_t)delta_1ms;
 
-        // (1) 1ms 단위 32-bit 확장 엔코더 위치 갱신 (부호 보정 + 오버플로우 안전)
-        uint16_t curr_cnt = (uint16_t)TIM3_CNT;
-        int16_t delta_1ms = (int16_t)(curr_cnt - s_prev_cnt_1ms);
-        s_prev_cnt_1ms = curr_cnt;
-        g_cart_counts += (int32_t)g_enc_sign * (int32_t)delta_1ms;
-        g_cart_pos_mm_x10 = (g_cart_counts * (RAIL_TRAVEL_MM * 10)) / g_enc_total_counts;
+    float pos_m = ((float)g_cart_counts * RAIL_TRAVEL_M) / (float)g_enc_total_counts;
+    float pos_mm = pos_m * 1000.0f;
 
-        // (2) 1ms 고속 Soft Limit 레일 보호 & 250ms 펄스 킥 자동 정지
-        if (g_motor_running) {
-            if (is_direction_blocked_by_limit(g_motor_dir)) {
-                motor_stop();
-                g_soft_limit_trip = 1U;
-            } else if ((int32_t)(g_system_millis - g_motor_stop_at) >= 0) {
-                motor_stop();
+    uint16_t adc_raw = adc1_read_pa1_avg4();
+    g_angle_adc_raw = adc_raw;
+    float theta_rad = (float)g_angle_sign * ((float)((int32_t)adc_raw - g_angle_zero_adc) * PI_F) / (float)g_pot_180_counts;
+    float theta_deg = theta_rad * RAD_TO_DEG_F;
+
+    // (2) 10ms 슬라이딩 윈도우 미분 + EMA LPF (alpha=0.15 @ 1kHz, fc ~ 28 Hz)
+    if (s_hist_reset_req) {
+        s_hist_reset_req = 0U;
+        for (uint8_t i = 0U; i < DIFF_WIN_SIZE; i++) {
+            s_pos_hist[i] = pos_m;
+            s_th_hist[i]  = theta_rad;
+        }
+        g_vel_mps  = 0.0f;
+        g_dtheta_rps = 0.0f;
+    } else {
+        float vel_raw = (pos_m - s_pos_hist[s_hist_idx]) * 100.0f;     // / 0.010s
+        float dth_raw = (theta_rad - s_th_hist[s_hist_idx]) * 100.0f;  // / 0.010s
+        s_pos_hist[s_hist_idx] = pos_m;
+        s_th_hist[s_hist_idx]  = theta_rad;
+        s_hist_idx = (uint8_t)((s_hist_idx + 1U) % DIFF_WIN_SIZE);
+
+        g_vel_mps    = 0.15f * vel_raw + 0.85f * g_vel_mps;
+        g_dtheta_rps = 0.15f * dth_raw + 0.85f * g_dtheta_rps;
+    }
+    g_pos_m     = pos_m;
+    g_theta_rad = theta_rad;
+
+    // 텔레메트리용 정수 스냅샷 업데이트
+    g_telem_pos_mm_x10  = (int32_t)(pos_mm * 10.0f);
+    g_telem_vel_mms_x10 = (int32_t)(g_vel_mps * 10000.0f);
+    g_telem_ang_cdeg    = (int32_t)(theta_deg * 100.0f);
+    g_telem_dth_x10     = (int32_t)(g_dtheta_rps * RAD_TO_DEG_F * 10.0f);
+
+    // (3) 제어 상태 머신: BALANCING -> ARMED -> IDLE / AUTO_CENTER
+    float abs_th_deg = (theta_deg >= 0.0f) ? theta_deg : -theta_deg;
+    float abs_pos_mm = (pos_mm >= 0.0f) ? pos_mm : -pos_mm;
+
+    if (g_ctrl_state == CTRL_BALANCING) {
+        // 낙하 또는 Soft Limit 초과 시 즉시 모터 차단 후 ARMED 복귀
+        if (abs_th_deg > CTRL_FALL_ANGLE_DEG) {
+            motor_stop();
+            g_telem_u_pct = 0;
+            g_ctrl_state  = CTRL_ARMED;
+            g_arm_hold_ms = 0U;
+            g_fall_trip   = 1U;
+            return;
+        }
+        if (g_soft_limit_on && (abs_pos_mm >= SOFT_LIMIT_MM)) {
+            motor_stop();
+            g_telem_u_pct     = 0;
+            g_ctrl_state      = CTRL_ARMED;
+            g_arm_hold_ms     = 0U;
+            g_soft_limit_trip = 1U;
+            return;
+        }
+
+        // u = -(k_th * theta + k_dth * dtheta [+ k_x * x + k_dx * dx])
+        float u = -(g_k_th * theta_rad + g_k_dth * g_dtheta_rps);
+        if (g_ctrl_mode == MODE_LQR) {
+            u -= (g_k_x * pos_m + g_k_dx * g_vel_mps);
+        }
+        motor_apply_control(u);
+    } else if (g_ctrl_state == CTRL_ARMED) {
+        motor_stop();
+        g_telem_u_pct = 0;
+        if ((abs_th_deg < CTRL_ARM_ANGLE_DEG) && (abs_pos_mm < CTRL_ARM_POS_MM)) {
+            g_arm_hold_ms++;
+            if (g_arm_hold_ms >= CTRL_ARM_HOLD_MS) {
+                g_ctrl_state  = CTRL_BALANCING;
+                g_arm_hold_ms = 0U;
             }
+        } else {
+            g_arm_hold_ms = 0U;
         }
-
-        // (3) 10ms(100Hz) 속도 추정(EMA LPF alpha=0.25) 및 ADC 샘플링 트리거
-        s_div_10ms++;
-        if (s_div_10ms >= 10U) {
-            s_div_10ms = 0U;
-
-            int32_t delta_10ms = g_cart_counts - s_prev_counts_10ms;
-            s_prev_counts_10ms = g_cart_counts;
-
-            int32_t raw_vel_x10 = (delta_10ms * (RAIL_TRAVEL_MM * 1000)) / g_enc_total_counts;
-            s_cart_vel_q4 = ((raw_vel_x10 << 4) + 3 * s_cart_vel_q4) >> 2;
-            g_cart_vel_mms_x10 = (s_cart_vel_q4 + ((s_cart_vel_q4 >= 0) ? 8 : -8)) >> 4;
-
-            g_tick_10ms = 1U;
+    } else if (g_home_state == HOME_AUTO_CENTER) {
+        int32_t err = -g_cart_counts;
+        int32_t abs_err = (err >= 0) ? err : -err;
+        if (abs_err <= HOME_CENTER_BAND_CNT) {
+            motor_stop();
+            g_telem_u_pct   = 0;
+            g_home_state    = HOME_IDLE;
+            g_soft_limit_on = 1U;
+        } else if ((g_system_millis - g_home_center_start) >= HOME_CENTER_TIMEOUT_MS) {
+            motor_stop();
+            g_telem_u_pct   = 0;
+            g_home_state    = HOME_IDLE;
+            g_soft_limit_on = 1U;
+        } else {
+            int32_t half_span = g_enc_total_counts / 2;
+            if (half_span < 1) half_span = 1;
+            float duty = 40.0f + ((float)(abs_err * 12) / (float)half_span);
+            if (duty > 52.0f) duty = 52.0f;
+            uint8_t dir = (err > 0) ? 1U : 0U;
+            motor_drive_pct(dir, duty);
+            g_telem_u_pct = dir ? (int32_t)duty : -(int32_t)duty;
         }
+    } else if (g_kick_active) {
+        if (is_direction_blocked_by_limit(g_motor_dir, pos_mm)) {
+            motor_stop();
+            g_telem_u_pct     = 0;
+            g_soft_limit_trip = 1U;
+        } else if ((int32_t)(g_system_millis - g_motor_stop_at) >= 0) {
+            motor_stop();
+            g_telem_u_pct = 0;
+        }
+    } else {
+        g_telem_u_pct = 0;
     }
 }
 
 void USART2_IRQHandler(void)
 {
     if (USART2_ISR & (1U << 3)) {
-        USART2_ICR = (1U << 3); // ORE 방어
+        USART2_ICR = (1U << 3);
     }
-    if (USART2_ISR & (1U << 5)) { // RXNE
+    if (USART2_ISR & (1U << 5)) {
         g_rx_cmd = (uint8_t)USART2_RDR;
     }
 }
 
 /* ============================================================================
- * 5. 가이드 캘리브레이션 & 자동 중앙 복귀 핸들러
+ * 5. 메뉴, 호밍/캘리브레이션, 실시간 게인 튜닝
  * ========================================================================== */
+static void print_menu(void)
+{
+    printf("\r\n==================================================================\r\n");
+    printf("  STM32G474RE Inverted Pendulum Project                           \r\n");
+    printf("  [Step 07 / CH-11] 1kHz LQR / PD Balancing Controller            \r\n");
+    printf("  Rate    : 1kHz Control (TIM6) | 20kHz PWM (TIM2) | 5V FT (TIM3) \r\n");
+    printf("------------------------------------------------------------------\r\n");
+    printf("  Balance : c = Arm/Disarm Balance (Lift <8deg to Auto-Start!)    \r\n");
+    printf("            m = Mode LQR <-> PD  | p = Flip Angle Sign (+/-)      \r\n");
+    printf("            s / Space = EMERGENCY STOP (Always Immediate Cut)     \r\n");
+    printf("  Tuning  : g = Select Gain (Kx/Kdx/Kth/Kdth/DZ) | +/- = Adjust   \r\n");
+    printf("  Homing  : h = Cart Homing (R->L->Center) | a = 2-Pt Angle Cal   \r\n");
+    printf("            d = 6h Zero | u = 12h Zero | z = Cart Zero | l = Lim  \r\n");
+    printf("  Manual  : f/b = 250ms Kick | 1~6 = Kick Duty | ? = Show Menu    \r\n");
+    printf("==================================================================\r\n");
+    printf("  Current K = [kx:");
+    print_fixed_3(g_k_x);
+    printf(", kdx:");
+    print_fixed_3(g_k_dx);
+    printf(", kth:");
+    print_fixed_3(g_k_th);
+    printf(", kdth:");
+    print_fixed_3(g_k_dth);
+    printf("] | DZ:%d%% | Sign:%+d\r\n\r\n", (int)g_deadzone_pct, (int)g_angle_sign);
+}
+
 static void handle_cart_homing_key(void)
 {
+    g_ctrl_state = CTRL_IDLE;
     if (g_home_state == HOME_IDLE) {
         motor_stop();
-        g_soft_limit_on = 0U; // 끝단 수동 이동 중 리미트 간섭 방지
+        g_soft_limit_on = 0U;
         g_home_state = HOME_WAIT_RIGHT;
-        printf("\r\n==================================================================\r\n");
-        printf("  [CART HOMING 1/2] 카트를 손으로 [오른쪽 끝]까지 밀고\r\n");
-        printf("                    터미널에서 'h' 를 한 번 더 누르세요. (취소: s)\r\n");
-        printf("==================================================================\r\n");
+        printf("\r\n[CART HOMING 1/2] 카트를 손으로 [오른쪽 끝]까지 밀고 'h'를 누르세요. (취소: s)\r\n");
     } else if (g_home_state == HOME_WAIT_RIGHT) {
         g_home_right_cnt = g_cart_counts;
         g_home_state = HOME_WAIT_LEFT;
-        printf("\r\n>>> [1/2 완료] 오른쪽 끝 엔코더 기록: %ld\r\n", (long)g_home_right_cnt);
-        printf("  [CART HOMING 2/2] 이제 카트를 손으로 [왼쪽 끝]까지 밀고\r\n");
-        printf("                    터미널에서 'h' 를 다시 누르세요. (취소: s)\r\n");
+        printf("\r\n>>> [1/2 완료] 오른쪽 끝 기록: %ld\r\n", (long)g_home_right_cnt);
+        printf("[CART HOMING 2/2] 카트를 손으로 [왼쪽 끝]까지 밀고 'h'를 누르세요. (취소: s)\r\n");
     } else if (g_home_state == HOME_WAIT_LEFT) {
         g_home_left_cnt = g_cart_counts;
         int32_t diff = g_home_right_cnt - g_home_left_cnt;
@@ -503,110 +668,97 @@ static void handle_cart_homing_key(void)
         int32_t span = diff;
 
         if (diff < 0) {
-            // 오른쪽이 왼쪽보다 작았다면 부호 반전으로 자동 정규화
             new_sign = (int8_t)(-g_enc_sign);
             span = -diff;
         }
-
         if (span < 1000) {
             g_home_state = HOME_IDLE;
             g_soft_limit_on = 1U;
-            printf("\r\n>>> [HOMING 실패] 양 끝단 간격(%ld counts)이 너무 작습니다. 다시 시도하세요.\r\n",
-                   (long)span);
+            printf("\r\n>>> [HOMING 실패] 간격(%ld)이 너무 작습니다.\r\n\r\n", (long)span);
             return;
         }
 
-        // 현재 카트는 왼쪽 끝에 있으므로 중앙(0) 기준 위치 = -(span / 2)로 설정!
-        int32_t left_origin_cnt = -(span / 2);
-        encoder_set_counts_atomic(left_origin_cnt, span, new_sign);
-
-        printf("\r\n>>> [2/2 완료] 실측 스트로크 = %ld counts (~%d mm), Sign = %+d\r\n",
+        encoder_set_counts_atomic(-(span / 2), span, new_sign);
+        printf("\r\n>>> [2/2 완료] 스트로크=%ld counts (~%d mm), Sign=%+d\r\n",
                (long)span, RAIL_TRAVEL_MM, (int)new_sign);
-        printf(">>> [AUTO CENTER] 중앙(Pos = 0.0 mm)으로 자동 이동합니다... (비상 정지: s)\r\n\r\n");
-
+        printf(">>> [AUTO CENTER] 중앙(0.0 mm)으로 이동합니다...\r\n");
         g_home_center_start = g_system_millis;
         g_home_state = HOME_AUTO_CENTER;
     }
-}
-
-static void cart_auto_center_step(void)
-{
-    if (g_home_state != HOME_AUTO_CENTER) return;
-
-    int32_t err = -g_cart_counts; // 목표 0 - 현재 위치
-    int32_t abs_err = (err >= 0) ? err : -err;
-
-    if (abs_err <= HOME_CENTER_BAND_CNT) {
-        motor_stop();
-        g_home_state = HOME_IDLE;
-        g_soft_limit_on = 1U;
-        printf("\r\n>>> [HOMING 완료] 중앙 위치 초기화 성공! Pos = ");
-        print_fixed_1(g_cart_pos_mm_x10);
-        printf(" mm (Soft Limit ON)\r\n\r\n");
-        return;
-    }
-
-    if ((g_system_millis - g_home_center_start) >= HOME_CENTER_TIMEOUT_MS) {
-        motor_stop();
-        g_home_state = HOME_IDLE;
-        g_soft_limit_on = 1U;
-        printf("\r\n>>> [HOMING 타임아웃] %ums 경과로 안전 정지! Pos = ", HOME_CENTER_TIMEOUT_MS);
-        print_fixed_1(g_cart_pos_mm_x10);
-        printf(" mm\r\n\r\n");
-        return;
-    }
-
-    // 비례 + 정지 마찰력(Stiction) 보상 듀티: 40% ~ 52%
-    int32_t half_span = g_enc_total_counts / 2;
-    if (half_span < 1) half_span = 1;
-    uint8_t duty = (uint8_t)(40 + ((abs_err * 12) / half_span));
-    if (duty > 52U) duty = 52U;
-
-    uint8_t dir = (err > 0) ? 1U : 0U;
-    motor_drive(dir, duty);
 }
 
 static void handle_angle_cal_key(void)
 {
     if (g_acal_state == ACAL_IDLE) {
         g_acal_state = ACAL_WAIT_DOWN;
-        printf("\r\n==================================================================\r\n");
-        printf("  [ANGLE CAL 1/2] 진자가 아래(6시)에서 자연스럽게 정지하면\r\n");
-        printf("                  터미널에서 'a' 를 한 번 더 누르세요. (취소: s)\r\n");
-        printf("==================================================================\r\n");
+        printf("\r\n[ANGLE CAL 1/2] 진자가 아래(6시) 정지 후 'a'를 누르세요. (취소: s)\r\n");
     } else if (g_acal_state == ACAL_WAIT_DOWN) {
-        g_angle_down_adc = adc1_read_pa1_avg();
+        g_angle_down_adc = g_angle_adc_raw;
         g_acal_state = ACAL_WAIT_UP;
-        printf("\r\n>>> [1/2 완료] 6시 정지 ADC 저장: %u\r\n", (unsigned int)g_angle_down_adc);
-        printf("  [ANGLE CAL 2/2] 이제 진자를 손으로 위(12시) 수직에 맞춘 뒤\r\n");
-        printf("                  터미널에서 'a' 를 다시 누르세요. (취소: s)\r\n");
+        printf("\r\n>>> [1/2 완료] 6시 ADC=%u\r\n", (unsigned int)g_angle_down_adc);
+        printf("[ANGLE CAL 2/2] 진자를 위(12시) 수직에 맞추고 'a'를 누르세요. (취소: s)\r\n");
     } else if (g_acal_state == ACAL_WAIT_UP) {
-        uint16_t up_adc = adc1_read_pa1_avg();
-        int32_t  diff   = (int32_t)up_adc - (int32_t)g_angle_down_adc;
-        int32_t  span   = (diff >= 0) ? diff : -diff;
+        uint16_t up_adc = g_angle_adc_raw;
+        int32_t diff = (int32_t)up_adc - (int32_t)g_angle_down_adc;
+        int32_t span = (diff >= 0) ? diff : -diff;
 
         if (span < 1200 || span > 2800) {
             g_acal_state = ACAL_IDLE;
-            printf("\r\n>>> [ANGLE CAL 실패] 6시(%u)와 12시(%u) 차이(%ld)가 비정상입니다.\r\n",
+            printf("\r\n>>> [ANGLE CAL 실패] 6시(%u)/12시(%u) 차이(%ld) 비정상.\r\n\r\n",
                    (unsigned int)g_angle_down_adc, (unsigned int)up_adc, (long)span);
-            printf("                     데드존 통과 여부 확인 후 다시 시도하세요.\r\n\r\n");
             return;
         }
 
         g_pot_up_dir_sign = (diff >= 0) ? 1 : -1;
         g_pot_180_counts  = span;
         g_angle_zero_adc  = (int32_t)up_adc;
+        s_hist_reset_req  = 1U;
         g_acal_state      = ACAL_IDLE;
-        angle_reseed_filter(up_adc);
-
-        printf("\r\n>>> [ANGLE CAL 완료] 6시=%u | 12시=%ld -> 실측 180deg = %ld counts\r\n",
-               (unsigned int)g_angle_down_adc, (long)g_angle_zero_adc, (long)g_pot_180_counts);
-        printf("                     (이후 6시 정지 상태에서 'd'만 눌러도 자동 12시 영점 복원!)\r\n\r\n");
+        printf("\r\n>>> [ANGLE CAL 완료] 12시=%ld, 실측 180deg=%ld counts\r\n\r\n",
+               (long)g_angle_zero_adc, (long)g_pot_180_counts);
     }
 }
 
+static void adjust_selected_gain(int8_t dir)
+{
+    float scale = (dir > 0) ? 1.10f : 0.90909f;
+    const char *names[TUNE_COUNT] = {"Kx", "Kdx", "Kth", "Kdth", "Deadzone%"};
+    float new_val = 0.0f;
+
+    switch (g_tune_idx) {
+    case TUNE_KX:
+        g_k_x *= scale;
+        new_val = g_k_x;
+        break;
+    case TUNE_KDX:
+        g_k_dx *= scale;
+        new_val = g_k_dx;
+        break;
+    case TUNE_KTH:
+        g_k_th *= scale;
+        new_val = g_k_th;
+        break;
+    case TUNE_KDTH:
+        g_k_dth *= scale;
+        new_val = g_k_dth;
+        break;
+    case TUNE_DEADZONE:
+        g_deadzone_pct += (dir > 0) ? 2.0f : -2.0f;
+        if (g_deadzone_pct < 0.0f)  g_deadzone_pct = 0.0f;
+        if (g_deadzone_pct > 50.0f) g_deadzone_pct = 50.0f;
+        new_val = g_deadzone_pct;
+        break;
+    default:
+        break;
+    }
+
+    printf("\r\n>>> [TUNE %s] = ", names[g_tune_idx]);
+    print_fixed_3(new_val);
+    printf("\r\n");
+}
+
 /* ============================================================================
- * 6. 메인 루프 (100Hz 각도 추정 + 5Hz 텔레메트리 + 키보드 조종/초기화)
+ * 6. 메인 루프 (명령 처리, 상태 전환 알림, 5Hz 텔레메트리)
  * ========================================================================== */
 int main(void)
 {
@@ -616,71 +768,95 @@ int main(void)
     motor_driver_init();
     encoder_tim3_init();
     adc1_pa1_init();
+    delay_ms(5); // 1kHz ISR이 초기 ADC 샘플 및 링버퍼 채울 시간 대기
 
-    angle_reseed_filter(adc1_read_pa1_avg());
-
-    printf("\r\n==================================================================\r\n");
-    printf("  STM32G474RE Inverted Pendulum Project                           \r\n");
-    printf("  [Step 06 / CH-10] TIM3 4x Encoder + ADC1 Angle + Homing Wizard  \r\n");
-    printf("  Sensors : PC6/PC7 (TIM3 5V FT) | PA1 (ADC1_IN2 WDD35D4-5K)      \r\n");
-    printf("  Safety  : +/-%d mm Rail Soft Limit (Auto Block Outward Motion)  \r\n", SOFT_LIMIT_MM);
-    printf("------------------------------------------------------------------\r\n");
-    printf("  Drive   : f/b = Right/Left 250ms | s/Space = STOP | 1~6 = Duty  \r\n");
-    printf("  Homing  : h = Cart Guided Homing (Right -> Left -> Auto Center) \r\n");
-    printf("            a = Pendulum 2-Point Cal (6h Down -> 12h Up)          \r\n");
-    printf("            d = Quick 6h Zero | u = Quick 12h Zero | z = Zero Pos \r\n");
-    printf("            l = Toggle Soft Limit (Currently ON)                \r\n");
-    printf("==================================================================\r\n\r\n");
+    print_menu();
 
     uint32_t last_print = 0U;
+    ControlState prev_ctrl_state = g_ctrl_state;
+    CartHomeState prev_home_state = g_home_state;
 
     while (1)
     {
-        // (A) Soft Limit 긴급 차단 이벤트 즉시 알림
+        // (A) 인터럽트 안전/상태 전환 이벤트 출력
+        if (g_fall_trip) {
+            g_fall_trip = 0U;
+            printf("\r\n>>> [FALL CUTOFF] |Angle| > %.0f deg! Motor stopped -> ARMED.\r\n",
+                   (double)CTRL_FALL_ANGLE_DEG);
+        }
         if (g_soft_limit_trip) {
             g_soft_limit_trip = 0U;
-            printf("\r\n>>> [SOFT LIMIT TRIGGERED] Motor cut at ");
-            print_fixed_1(g_cart_pos_mm_x10);
-            printf(" mm! Move opposite dir or press 'z'.\r\n");
+            printf("\r\n>>> [SOFT LIMIT] Motor cut at ");
+            print_fixed_1(g_telem_pos_mm_x10);
+            printf(" mm!\r\n");
         }
-
-        // (B) 10ms (100Hz) 진자 각도·각속도 갱신 및 카트 자동 중앙 복귀 제어
-        if (g_tick_10ms) {
-            g_tick_10ms = 0U;
-
-            g_angle_adc_raw = adc1_read_pa1_avg();
-            g_angle_cdeg = angle_adc_to_cdeg(g_angle_adc_raw);
-
-            int32_t raw_dtheta_x10 = (g_angle_cdeg - g_prev_angle_cdeg) * 10;
-            g_prev_angle_cdeg = g_angle_cdeg;
-
-            g_angle_vel_q4 = ((raw_dtheta_x10 << 4) + 3 * g_angle_vel_q4) >> 2;
-            g_angle_vel_x10 = (g_angle_vel_q4 + ((g_angle_vel_q4 >= 0) ? 8 : -8)) >> 4;
-
-            cart_auto_center_step();
+        if (g_ctrl_state != prev_ctrl_state) {
+            if (g_ctrl_state == CTRL_BALANCING) {
+                printf("\r\n>>> [BALANCING START] %s 1kHz Active!\r\n",
+                       (g_ctrl_mode == MODE_LQR) ? "LQR" : "PD");
+            }
+            prev_ctrl_state = g_ctrl_state;
         }
+        if (prev_home_state == HOME_AUTO_CENTER && g_home_state == HOME_IDLE) {
+            printf("\r\n>>> [HOMING 완료] 중앙 위치 정지! Pos=");
+            print_fixed_1(g_telem_pos_mm_x10);
+            printf(" mm (Soft Limit ON)\r\n\r\n");
+        }
+        prev_home_state = g_home_state;
 
-        // (C) USART2 키보드 명령 처리
+        // (B) USART2 키보드 명령 처리
         if (g_rx_cmd != 0U) {
             uint8_t cmd = g_rx_cmd;
             g_rx_cmd = 0U;
 
             if (cmd == 's' || cmd == 'S' || cmd == ' ') {
                 motor_stop();
+                g_ctrl_state = CTRL_IDLE;
                 if (g_home_state != HOME_IDLE || g_acal_state != ACAL_IDLE) {
-                    g_home_state = HOME_IDLE;
-                    g_acal_state = ACAL_IDLE;
+                    g_home_state    = HOME_IDLE;
+                    g_acal_state    = ACAL_IDLE;
                     g_soft_limit_on = 1U;
-                    printf("\r\n>>> [ABORT] 비상 정지 및 캘리브레이션 마법사 취소 (Soft Limit ON)\r\n\r\n");
+                    printf("\r\n>>> [ABORT] 비상 정지 및 마법사 취소\r\n\r\n");
                 } else {
-                    printf("\r\n>>> [STOP] Emergency Stop! (CCR1=0)\r\n");
+                    printf("\r\n>>> [STOP] IDLE 모드 (CCR1=0)\r\n");
                 }
+            } else if (cmd == '?') {
+                print_menu();
+            } else if (cmd == 'c' || cmd == 'C') {
+                if (g_ctrl_state == CTRL_IDLE) {
+                    g_home_state  = HOME_IDLE;
+                    g_acal_state  = ACAL_IDLE;
+                    g_arm_hold_ms = 0U;
+                    g_ctrl_state  = CTRL_ARMED;
+                    printf("\r\n>>> [ARMED] 진자를 12시(+/-8 deg)로 세우면 %s 밸런싱이 시작됩니다!\r\n",
+                           (g_ctrl_mode == MODE_LQR) ? "LQR" : "PD");
+                } else {
+                    motor_stop();
+                    g_ctrl_state = CTRL_IDLE;
+                    printf("\r\n>>> [DISARMED] IDLE 모드 복귀\r\n");
+                }
+            } else if (cmd == 'm' || cmd == 'M') {
+                g_ctrl_mode = (g_ctrl_mode == MODE_LQR) ? MODE_PD : MODE_LQR;
+                printf("\r\n>>> [MODE] %s\r\n",
+                       (g_ctrl_mode == MODE_LQR) ? "LQR (4-State Position+Angle)" : "PD (Angle-Only)");
+            } else if (cmd == 'p' || cmd == 'P') {
+                g_angle_sign = (int8_t)(-g_angle_sign);
+                s_hist_reset_req = 1U;
+                printf("\r\n>>> [ANGLE SIGN] %+d (오른쪽 기울임 = + 가 되도록 맞추세요)\r\n",
+                       (int)g_angle_sign);
+            } else if (cmd == 'g' || cmd == 'G') {
+                const char *names[TUNE_COUNT] = {"Kx", "Kdx", "Kth", "Kdth", "Deadzone%"};
+                g_tune_idx = (TuneParamIndex)((g_tune_idx + 1U) % TUNE_COUNT);
+                printf("\r\n>>> [TUNE SELECT] %s (조절: '+' 또는 '-')\r\n", names[g_tune_idx]);
+            } else if (cmd == '+' || cmd == '=') {
+                adjust_selected_gain(1);
+            } else if (cmd == '-' || cmd == '_') {
+                adjust_selected_gain(-1);
             } else if (cmd == 'h' || cmd == 'H') {
                 handle_cart_homing_key();
             } else if (cmd == 'a' || cmd == 'A') {
                 handle_angle_cal_key();
             } else if (g_home_state != HOME_IDLE || g_acal_state != ACAL_IDLE) {
-                // 마법사 진행 중 오조작 방지 (ENTER 키도 현재 단계 진행으로 허용)
                 if (cmd == '\r' || cmd == '\n') {
                     if (g_home_state == HOME_WAIT_RIGHT || g_home_state == HOME_WAIT_LEFT) {
                         handle_cart_homing_key();
@@ -688,58 +864,55 @@ int main(void)
                         handle_angle_cal_key();
                     }
                 }
-            } else if (cmd == 'f' || cmd == 'F') {
-                printf("\r\n>>> [KICK RIGHT] Dir=1 (PH=1), Duty=%u%% (250ms)\r\n", g_test_duty_pct);
-                motor_kick(1U, g_test_duty_pct, 250U);
-            } else if (cmd == 'b' || cmd == 'B') {
-                printf("\r\n>>> [KICK LEFT]  Dir=0 (PH=0), Duty=%u%% (250ms)\r\n", g_test_duty_pct);
-                motor_kick(0U, g_test_duty_pct, 250U);
-            } else if (cmd >= '1' && cmd <= '6') {
-                const uint8_t duties[6] = {15, 25, 35, 50, 65, 80};
-                g_test_duty_pct = duties[cmd - '1'];
-                printf("\r\n>>> [DUTY SET] Test Duty = %u%% (CCR1=%u/800)\r\n",
-                       g_test_duty_pct,
-                       (unsigned int)(((PWM_ARR_MAX + 1U) * g_test_duty_pct) / 100U));
             } else if (cmd == 'z' || cmd == 'Z') {
-                encoder_zero();
-                printf("\r\n>>> [ZERO CART] TIM3 Encoder Reset -> Pos = +0.0 mm\r\n");
+                encoder_set_counts_atomic(0, g_enc_total_counts, g_enc_sign);
+                printf("\r\n>>> [ZERO CART] Pos = +0.0 mm\r\n");
             } else if (cmd == 'd' || cmd == 'D') {
-                g_angle_down_adc = adc1_read_pa1_avg();
+                g_angle_down_adc = g_angle_adc_raw;
                 g_angle_zero_adc = (int32_t)g_angle_down_adc + (g_pot_up_dir_sign * g_pot_180_counts);
-                angle_reseed_filter(g_angle_down_adc);
-                printf("\r\n>>> [6h ZERO] 6시 정지 ADC=%u 저장 -> 12시 영점(%ld) 자동 산출 (현재 Angle=",
+                s_hist_reset_req = 1U;
+                printf("\r\n>>> [6h ZERO] 6시 ADC=%u -> 12시 영점(%ld) 자동 산출\r\n",
                        (unsigned int)g_angle_down_adc, (long)g_angle_zero_adc);
-                print_fixed_2(g_angle_cdeg);
-                printf(" deg)\r\n");
             } else if (cmd == 'u' || cmd == 'U') {
-                uint16_t up_adc = adc1_read_pa1_avg();
-                g_angle_zero_adc = (int32_t)up_adc;
-                angle_reseed_filter(up_adc);
-                printf("\r\n>>> [12h ZERO] Upright Reference Calibrated: ADC = %ld -> +0.00 deg\r\n",
+                g_angle_zero_adc = (int32_t)g_angle_adc_raw;
+                s_hist_reset_req = 1U;
+                printf("\r\n>>> [12h ZERO] 12시 영점 ADC=%ld -> +0.00 deg\r\n",
                        (long)g_angle_zero_adc);
             } else if (cmd == 'l' || cmd == 'L') {
                 g_soft_limit_on = g_soft_limit_on ? 0U : 1U;
-                printf("\r\n>>> [SOFT LIMIT] Protection %s (+/-%d mm)\r\n",
-                       g_soft_limit_on ? "ENABLED" : "DISABLED (Caution!)",
-                       SOFT_LIMIT_MM);
+                printf("\r\n>>> [SOFT LIMIT] %s\r\n", g_soft_limit_on ? "ON" : "OFF");
+            } else if (g_ctrl_state == CTRL_IDLE) {
+                if (cmd == 'f' || cmd == 'F') {
+                    printf("\r\n>>> [KICK RIGHT] Duty=%u%%\r\n", g_test_duty_pct);
+                    motor_kick(1U, g_test_duty_pct, 250U);
+                } else if (cmd == 'b' || cmd == 'B') {
+                    printf("\r\n>>> [KICK LEFT] Duty=%u%%\r\n", g_test_duty_pct);
+                    motor_kick(0U, g_test_duty_pct, 250U);
+                } else if (cmd >= '1' && cmd <= '6') {
+                    const uint8_t duties[6] = {15, 25, 35, 50, 65, 80};
+                    g_test_duty_pct = duties[cmd - '1'];
+                    printf("\r\n>>> [DUTY SET] %u%%\r\n", g_test_duty_pct);
+                }
             }
         }
 
-        // (D) 200ms (5Hz) 텔레메트리 출력 (안내 프롬프트 대기 중에는 화면 가독성을 위해 일시 정지)
+        // (C) 200ms (5Hz) 텔레메트리 출력
         if ((g_home_state == HOME_IDLE || g_home_state == HOME_AUTO_CENTER) &&
             (g_acal_state == ACAL_IDLE) &&
             ((g_system_millis - last_print) >= 200U)) {
             last_print = g_system_millis;
+            const char *st = (g_ctrl_state == CTRL_BALANCING) ? "BAL" :
+                             ((g_ctrl_state == CTRL_ARMED) ? "ARM" : "IDL");
 
-            printf("Pos: ");
-            print_fixed_1(g_cart_pos_mm_x10);
-            printf(" mm (CNT:%+6ld) | Vel: ", (long)g_cart_counts);
-            print_fixed_1(g_cart_vel_mms_x10);
-            printf(" mm/s | Angle: ");
-            print_fixed_2(g_angle_cdeg);
-            printf(" deg (ADC:%4u) | dTh: ", (unsigned int)g_angle_adc_raw);
-            print_fixed_1(g_angle_vel_x10);
-            printf(" deg/s | Lim:%s\r\n", g_soft_limit_on ? "ON " : "OFF");
+            printf("[%s|%s] x:", st, (g_ctrl_mode == MODE_LQR) ? "LQR" : "PD ");
+            print_fixed_1(g_telem_pos_mm_x10);
+            printf("mm dx:");
+            print_fixed_1(g_telem_vel_mms_x10);
+            printf(" | th:");
+            print_fixed_2(g_telem_ang_cdeg);
+            printf("deg dth:");
+            print_fixed_1(g_telem_dth_x10);
+            printf(" | PWM:%+3ld%%\r\n", (long)g_telem_u_pct);
         }
     }
 }

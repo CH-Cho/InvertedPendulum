@@ -41,7 +41,7 @@ NUCLEO-G474RE 보드를 기반으로 하드웨어 저수준(Bare-metal) 레지�
 | **04** | **Timer TimeBase** | 1ms(1kHz) 고정 주기 타이머 인터럽트를 통한 실시간 제어 루프 | [docs/04_timer_timebase.md](docs/04_timer_timebase.md) | [CH-8](https://linear.app/ch-cho/issue/CH-8) | ✅ 완료 |
 | **05** | **Timer PWM** | TIM2 20kHz 무소음 PWM, Pololu #4037 H-Bridge 정/역회전, USART2 키보드 원격 조종 | [docs/05_timer_pwm.md](docs/05_timer_pwm.md) | [CH-9](https://linear.app/ch-cho/issue/CH-9) | ✅ 완료 |
 | **06** | **Timer Encoder & ADC** | `TIM3` 4체배 직교 엔코더(PC6/PC7, FT) 거리·속도 계산 & `ADC1` 각도 캘리브레이션 | [docs/06_timer_encoder.md](docs/06_timer_encoder.md) | [CH-10](https://linear.app/ch-cho/issue/CH-10) | ✅ 완료 |
-| **07** | **Pendulum Control** | 도립진자 비선형 모델링, 선형화, PID 및 LQR 상태 피드백 제어 | [docs/07_pendulum_control.md](docs/07_pendulum_control.md) | [CH-11](https://linear.app/ch-cho/issue/CH-11) | ⏳ 예정 |
+| **07** | **Pendulum Control** | 도립진자 비선형 모델링, 선형화, 1kHz LQR / PD 균형 제어 & 실시간 튜닝 | [docs/07_pendulum_control.md](docs/07_pendulum_control.md) | [CH-11](https://linear.app/ch-cho/issue/CH-11) | 🔄 진행중 |
 
 ---
 
@@ -83,6 +83,7 @@ InvertedPendulum/
 │   ├── 04_timer_timebase.md
 │   ├── 05_timer_pwm.md                  # Step 05-1 (1kHz) + Step 05-2 (20kHz & DRV8876)
 │   ├── 06_timer_encoder.md              # Step 06 (TIM3 4x 엔코더, ADC1 각도, Soft Limit)
+│   ├── 07_pendulum_control.md           # Step 07 (1kHz LQR/PD 밸런싱 제어 및 현장 튜닝)
 │   ├── deep_dive_stop0_low_power.md
 │   ├── images/                          # 검증 완료된 회로도 및 실물/데이터시트 핀맵
 │   └── ST_manuals/                      # STM32G4 공식 매뉴얼 (RM0440, DS12288, UM2505 등)
