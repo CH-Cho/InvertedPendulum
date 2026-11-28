@@ -200,11 +200,11 @@ static volatile uint8_t  s_hist_reset_req     = 1;
 static volatile ControlState   g_ctrl_state   = CTRL_IDLE;
 static volatile ControlMode    g_ctrl_mode    = MODE_LQR;
 static volatile TuneParamIndex g_tune_idx     = TUNE_KTH;
-static volatile float          g_k_x          = -1.464f;
-static volatile float          g_k_dx         = -2.662f;
-static volatile float          g_k_th         = -23.958f;
-static volatile float          g_k_dth        = -2.545f;
-static volatile float          g_k_ix         = -1.500f;
+static volatile float          g_k_x          = -1.610f;
+static volatile float          g_k_dx         = -2.928f;
+static volatile float          g_k_th         = -28.989f;
+static volatile float          g_k_dth        = -3.388f;
+static volatile float          g_k_ix         = -0.435f;
 static volatile float          g_int_x        = 0.0f;
 static volatile float          g_deadzone_pct = 18.0f;
 static volatile float          g_last_u_cmd   = 0.0f;
@@ -654,8 +654,9 @@ static void print_menu(void)
     printf("            s / Space = EMERGENCY STOP (Always Immediate Cut)     \r\n");
     printf("  Tuning  : g = Select Gain (Kx/Kdx/Kth/Kdth/Kix/DZ) | +/- Adjust\r\n");
     printf("            [/] = Angle Zero Trim (-/+0.10 deg, Drift Fix!)      \r\n");
-    printf("  Homing  : h = Cart Homing (R->L->Center) | a = 2-Pt Angle Cal   \r\n");
-    printf("            d = 6h Zero | u = 12h Zero | z = Cart Zero | l = Lim  \r\n");
+    printf("  Homing  : h = Cart Homing (R->L->Center) | r/0 = Go to Center   \r\n");
+    printf("            a = 2-Pt Angle Cal | d = 6h Zero | u = 12h Zero     \r\n");
+    printf("            z = Cart Zero | l = Soft Limit | Enter = Read State   \r\n");
     printf("  Manual  : f/b = 250ms Kick | 1~6 = Kick Duty | ? = Show Menu    \r\n");
     printf("==================================================================\r\n");
     printf("  Current K = [kx:");
@@ -786,6 +787,22 @@ static void adjust_selected_gain(int8_t dir)
     printf("\r\n");
 }
 
+static void print_telemetry_line(void)
+{
+    const char *st = (g_ctrl_state == CTRL_BALANCING) ? "BAL" :
+                     ((g_ctrl_state == CTRL_ARMED) ? "ARM" : "IDL");
+
+    printf("[%s|%s] x:", st, (g_ctrl_mode == MODE_LQR) ? "LQR" : "PD ");
+    print_fixed_1(g_telem_pos_mm_x10);
+    printf("mm dx:");
+    print_fixed_1(g_telem_vel_mms_x10);
+    printf(" | th:");
+    print_fixed_2(g_telem_ang_cdeg);
+    printf("deg dth:");
+    print_fixed_1(g_telem_dth_x10);
+    printf(" | PWM:%+3ld%%\r\n", (long)g_telem_u_pct);
+}
+
 /* ============================================================================
  * 6. 메인 루프 (명령 처리, 상태 전환 알림, 5Hz 텔레메트리)
  * ========================================================================== */
@@ -886,6 +903,13 @@ int main(void)
                 printf("\r\n>>> [ZERO TRIM] Shift = ");
                 print_fixed_2((int32_t)(g_zero_shift_deg * 100.0f));
                 printf(" deg\r\n");
+            } else if (cmd == 'r' || cmd == 'R' || cmd == '0') {
+                motor_stop();
+                g_ctrl_state        = CTRL_IDLE;
+                g_acal_state        = ACAL_IDLE;
+                g_home_center_start = g_system_millis;
+                g_home_state        = HOME_AUTO_CENTER;
+                printf("\r\n>>> [AUTO CENTER] 중앙(0.0 mm)으로 이동합니다... (비상 정지: s)\r\n");
             } else if (cmd == 'h' || cmd == 'H') {
                 handle_cart_homing_key();
             } else if (cmd == 'a' || cmd == 'A') {
@@ -898,6 +922,8 @@ int main(void)
                         handle_angle_cal_key();
                     }
                 }
+            } else if (cmd == '\r' || cmd == '\n') {
+                print_telemetry_line();
             } else if (cmd == 'z' || cmd == 'Z') {
                 encoder_set_counts_atomic(0, g_enc_total_counts, g_enc_sign);
                 printf("\r\n>>> [ZERO CART] Pos = +0.0 mm\r\n");
@@ -930,25 +956,23 @@ int main(void)
                     printf("\r\n>>> [DUTY SET] %u%%\r\n", g_test_duty_pct);
                 }
             }
+
+            // IDL 상태에서는 명령을 내릴 때만 현재 상태 스냅샷 1줄을 출력해 이전 시험 로그를 보존
+            if ((g_ctrl_state == CTRL_IDLE) &&
+                (g_home_state == HOME_IDLE) &&
+                (g_acal_state == ACAL_IDLE) &&
+                (cmd != '?') && (cmd != '\r') && (cmd != '\n')) {
+                print_telemetry_line();
+            }
         }
 
-        // (C) 200ms (5Hz) 텔레메트리 출력
-        if ((g_home_state == HOME_IDLE || g_home_state == HOME_AUTO_CENTER) &&
+        // (C) 200ms (5Hz) 연속 텔레메트리: BAL / ARM / 자동 중앙 복귀 / 수동 킥 중에만 출력
+        if (((g_ctrl_state != CTRL_IDLE) || (g_home_state == HOME_AUTO_CENTER) || g_kick_active) &&
+            ((g_home_state == HOME_IDLE) || (g_home_state == HOME_AUTO_CENTER)) &&
             (g_acal_state == ACAL_IDLE) &&
             ((g_system_millis - last_print) >= 200U)) {
             last_print = g_system_millis;
-            const char *st = (g_ctrl_state == CTRL_BALANCING) ? "BAL" :
-                             ((g_ctrl_state == CTRL_ARMED) ? "ARM" : "IDL");
-
-            printf("[%s|%s] x:", st, (g_ctrl_mode == MODE_LQR) ? "LQR" : "PD ");
-            print_fixed_1(g_telem_pos_mm_x10);
-            printf("mm dx:");
-            print_fixed_1(g_telem_vel_mms_x10);
-            printf(" | th:");
-            print_fixed_2(g_telem_ang_cdeg);
-            printf("deg dth:");
-            print_fixed_1(g_telem_dth_x10);
-            printf(" | PWM:%+3ld%%\r\n", (long)g_telem_u_pct);
+            print_telemetry_line();
         }
     }
 }
