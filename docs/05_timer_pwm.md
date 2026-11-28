@@ -503,15 +503,258 @@ NUCLEO-G474RE(`DS12288`) 핀 정의표 검증 결과, G474 시리즈는 내장 O
 
 ---
 
-### 8.5 Step 05-2 및 전체 하드웨어 통합 검증 결과
+### 8.5 레일 양끝 충돌(End-Stop) 안전 처리 전략
 
-1. **모터 구동 검증 (`DRV8876` + IP570)**:
-   - `25%` 듀티에서는 기구물 정지 마찰력(Stiction)이 커서 정지 상태 유지 $\rightarrow$ `50%` 듀티(`4`번 키) 상향 시 안정적 기동 확인.
+IP570 선형 도립진자 기구물에는 하드웨어 리미트 스위치가 내장되어 있지 않기 때문에, 단계별로 다음과 같이 레일 충돌을 방지합니다:
+
+1. **Step 05-2 (현재 단계 — 엔코더 미사용)**:
+   - 소프트웨어로 카트의 절대 위치를 아직 알 수 없으므로, `f`/`b` 명령 시 **`250ms` 시간 제한 펄스 킥(Time-Limited Pulse Kick)**으로 짧게 이동 후 자동 정지(`TIM2_CCR1 = 0`)합니다.
+2. **Step 06 (`TIM3` 엔코더 도입 후 — 소프트웨어 리미트 스위치 / Soft Limit)**:
+   - 엔코더로 전체 이동 구간(`385 mm` $\approx 6,279$ 카운트)을 실시간 계측할 수 있게 되면, 중앙을 `0 mm`로 두고 **안전 경계(예: `|x| > 150 mm`)를 벗어날 경우 즉시 PWM을 차단하는 소프트웨어 리미트(Soft Limit)** 및 스톨 기반 원점 호밍을 구현합니다.
+3. **Step 07 (균형 제어 PID/LQR 도입 후 — 위치 복원 & Fail-Safe)**:
+   - 상태피드백 항이 카트를 항상 레일 중앙($x = 0$)으로 되돌려 놓으며, 넘어짐(`|θ| > 35°`) 또는 끝단 도달 시 즉시 모터를 정지시키는 Safety Latch를 적용합니다.
+
+---
+
+### 8.6 Step 05-2 전체 소스 코드 (`Src/main.c`)
+
+아래 코드는 엔코더/ADC 없이 **Step 05-2(20kHz PWM + DRV8876 + USART2 키보드 원격 제어)**만 단독으로 빌드·실습할 수 있는 전체 코드입니다.
+
+```c
+/**
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : [CH-9 / Step 05-2] TIM2 20kHz PWM + DRV8876 H-Bridge
+ *                   + USART2 RX 인터럽트 기반 키보드 실시간 모터 조종
+ *                   - PA0 (A0) / PA5 : TIM2_CH1 20kHz PWM (DRV8876 EN / LD2 LED)
+ *                   - PB0 (A3)       : GPIO Output 모터 방향 (PH: 1=오른쪽 f, 0=왼쪽 b)
+ *                   - USART2 (VCP)   : 115200 bps 키보드 원격 조종 (RXNE 인터럽트)
+ *                   - TIM6           : 1ms 타임베이스 (250ms 안전 자동 정지 타이머)
+ * @repository     : https://github.com/CH-Cho/InvertedPendulum
+ ******************************************************************************
+ */
+
+#include <stdint.h>
+#include <stdio.h>
+
+#define RCC_BASE            0x40021000U
+#define RCC_AHB2ENR         (*(volatile uint32_t *)(RCC_BASE + 0x4CU))
+#define RCC_APB1ENR1        (*(volatile uint32_t *)(RCC_BASE + 0x58U))
+
+#define GPIOA_BASE          0x48000000U
+#define GPIOA_MODER         (*(volatile uint32_t *)(GPIOA_BASE + 0x00U))
+#define GPIOA_AFRL          (*(volatile uint32_t *)(GPIOA_BASE + 0x20U))
+
+#define GPIOB_BASE          0x48000400U
+#define GPIOB_MODER         (*(volatile uint32_t *)(GPIOB_BASE + 0x00U))
+#define GPIOB_ODR           (*(volatile uint32_t *)(GPIOB_BASE + 0x14U))
+
+#define NVIC_ISER1          (*(volatile uint32_t *)(0xE000E104U))
+
+#define USART2_BASE         0x40004400U
+#define USART2_CR1          (*(volatile uint32_t *)(USART2_BASE + 0x00U))
+#define USART2_BRR          (*(volatile uint32_t *)(USART2_BASE + 0x0CU))
+#define USART2_ISR          (*(volatile uint32_t *)(USART2_BASE + 0x1CU))
+#define USART2_ICR          (*(volatile uint32_t *)(USART2_BASE + 0x20U))
+#define USART2_RDR          (*(volatile uint32_t *)(USART2_BASE + 0x24U))
+#define USART2_TDR          (*(volatile uint32_t *)(USART2_BASE + 0x28U))
+
+#define TIM6_BASE           0x40001000U
+#define TIM6_CR1            (*(volatile uint32_t *)(TIM6_BASE + 0x00U))
+#define TIM6_DIER           (*(volatile uint32_t *)(TIM6_BASE + 0x0CU))
+#define TIM6_SR             (*(volatile uint32_t *)(TIM6_BASE + 0x10U))
+#define TIM6_PSC            (*(volatile uint32_t *)(TIM6_BASE + 0x28U))
+#define TIM6_ARR            (*(volatile uint32_t *)(TIM6_BASE + 0x2CU))
+
+#define TIM2_BASE           0x40000000U
+#define TIM2_CR1            (*(volatile uint32_t *)(TIM2_BASE + 0x00U))
+#define TIM2_CCMR1          (*(volatile uint32_t *)(TIM2_BASE + 0x18U))
+#define TIM2_CCER           (*(volatile uint32_t *)(TIM2_BASE + 0x20U))
+#define TIM2_PSC            (*(volatile uint32_t *)(TIM2_BASE + 0x28U))
+#define TIM2_ARR            (*(volatile uint32_t *)(TIM2_BASE + 0x2CU))
+#define TIM2_CCR1           (*(volatile uint32_t *)(TIM2_BASE + 0x34U))
+
+#define PWM_ARR_MAX         799U   // 16MHz / (0+1) / (799+1) = 20,000 Hz (20kHz)
+
+static volatile uint32_t g_system_millis = 0;
+static volatile uint32_t g_motor_stop_at = 0;
+static volatile uint8_t  g_motor_running = 0;
+static volatile uint8_t  g_test_duty_pct = 50;
+static volatile uint8_t  g_motor_dir     = 1;
+static volatile uint8_t  g_rx_cmd        = 0;
+
+static void uart2_write_char(uint8_t ch)
+{
+    while (!(USART2_ISR & (1U << 7)));
+    USART2_TDR = ch;
+}
+
+int _write(int file, char *ptr, int len)
+{
+    (void)file;
+    for (int i = 0; i < len; i++) {
+        if (ptr[i] == '\n') {
+            uart2_write_char('\r');
+        }
+        uart2_write_char((uint8_t)ptr[i]);
+    }
+    return len;
+}
+
+static void uart2_init(void)
+{
+    RCC_AHB2ENR  |= (1U << 0);
+    RCC_APB1ENR1 |= (1U << 17);
+
+    GPIOA_MODER &= ~((3U << (2 * 2)) | (3U << (3 * 2)));
+    GPIOA_MODER |=  ((2U << (2 * 2)) | (2U << (3 * 2)));
+    GPIOA_AFRL  &= ~((0xFU << (2 * 4)) | (0xFU << (3 * 4)));
+    GPIOA_AFRL  |=  ((0x7U << (2 * 4)) | (0x7U << (3 * 4)));
+
+    USART2_BRR = 139U;
+    USART2_CR1 = (1U << 0) | (1U << 2) | (1U << 3) | (1U << 5);
+    NVIC_ISER1 = (1U << (38 - 32));
+}
+
+static void tim6_init(void)
+{
+    RCC_APB1ENR1 |= (1U << 4);
+    TIM6_PSC = 15U;
+    TIM6_ARR = 999U;
+    TIM6_DIER |= (1U << 0);
+    NVIC_ISER1 = (1U << (54 - 32));
+    TIM6_CR1 |= (1U << 0);
+}
+
+static void motor_driver_init(void)
+{
+    RCC_AHB2ENR  |= (1U << 0) | (1U << 1);
+    RCC_APB1ENR1 |= (1U << 0);
+
+    GPIOA_MODER &= ~((3U << (0 * 2)) | (3U << (5 * 2)));
+    GPIOA_MODER |=  ((2U << (0 * 2)) | (2U << (5 * 2)));
+    GPIOA_AFRL  &= ~((0xFU << (0 * 4)) | (0xFU << (5 * 4)));
+    GPIOA_AFRL  |=  ((0x1U << (0 * 4)) | (0x1U << (5 * 4)));
+
+    GPIOB_MODER &= ~(3U << (0 * 2));
+    GPIOB_MODER |=  (1U << (0 * 2));
+    GPIOB_ODR   |=  (1U << 0);
+
+    TIM2_PSC   = 0U;
+    TIM2_ARR   = PWM_ARR_MAX;
+    TIM2_CCR1  = 0U;
+    TIM2_CCMR1 = (0x6U << 4) | (1U << 3);
+    TIM2_CCER  = (1U << 0);
+    TIM2_CR1   = (1U << 0);
+}
+
+static void motor_stop(void)
+{
+    TIM2_CCR1 = 0U;
+    g_motor_running = 0U;
+}
+
+static void motor_kick(uint8_t dir, uint8_t duty_pct, uint32_t duration_ms)
+{
+    g_motor_dir = dir ? 1U : 0U;
+    if (g_motor_dir) {
+        GPIOB_ODR |= (1U << 0);
+    } else {
+        GPIOB_ODR &= ~(1U << 0);
+    }
+
+    uint32_t ccr = ((PWM_ARR_MAX + 1U) * duty_pct) / 100U;
+    if (ccr > PWM_ARR_MAX) ccr = PWM_ARR_MAX;
+
+    TIM2_CCR1 = ccr;
+    g_motor_stop_at = g_system_millis + duration_ms;
+    g_motor_running = 1U;
+}
+
+void TIM6_DACUNDER_IRQHandler(void)
+{
+    if (TIM6_SR & (1U << 0)) {
+        TIM6_SR &= ~(1U << 0);
+        g_system_millis++;
+
+        if (g_motor_running && ((int32_t)(g_system_millis - g_motor_stop_at) >= 0)) {
+            motor_stop();
+        }
+    }
+}
+
+void USART2_IRQHandler(void)
+{
+    if (USART2_ISR & (1U << 3)) {
+        USART2_ICR = (1U << 3);
+    }
+    if (USART2_ISR & (1U << 5)) {
+        g_rx_cmd = (uint8_t)USART2_RDR;
+    }
+}
+
+int main(void)
+{
+    tim6_init();
+    uart2_init();
+    motor_driver_init();
+
+    printf("\r\n============================================================\r\n");
+    printf("  STM32G474RE Inverted Pendulum Project                     \r\n");
+    printf("  [Step 05-2] 20kHz PWM + DRV8876 + UART Keyboard Control   \r\n");
+    printf("  Outputs : PA0 (TIM2_CH1 PWM -> EN) | PB0 (DIR -> PH)      \r\n");
+    printf("  Safety  : 250ms Auto-Stop Pulse Kick (No End-Stop Switch) \r\n");
+    printf("------------------------------------------------------------\r\n");
+    printf("  Commands: f = Right(FWD) 250ms | b = Left(REV) 250ms      \r\n");
+    printf("            s / Space = Emergency STOP                      \r\n");
+    printf("            1~6 = Duty Preset (15%%,25%%,35%%,50%%,65%%,80%%) \r\n");
+    printf("============================================================\r\n\r\n");
+
+    uint32_t last_print = 0;
+
+    while (1)
+    {
+        if (g_rx_cmd != 0) {
+            uint8_t cmd = g_rx_cmd;
+            g_rx_cmd = 0;
+
+            if (cmd == 's' || cmd == 'S' || cmd == ' ') {
+                motor_stop();
+                printf("\r\n>>> [STOP] Emergency Stop! (CCR1=0)\r\n");
+            } else if (cmd == 'f' || cmd == 'F') {
+                printf("\r\n>>> [KICK RIGHT] Dir=1 (PH=1), Duty=%u%% (250ms)\r\n", g_test_duty_pct);
+                motor_kick(1, g_test_duty_pct, 250);
+            } else if (cmd == 'b' || cmd == 'B') {
+                printf("\r\n>>> [KICK LEFT]  Dir=0 (PH=0), Duty=%u%% (250ms)\r\n", g_test_duty_pct);
+                motor_kick(0, g_test_duty_pct, 250);
+            } else if (cmd >= '1' && cmd <= '6') {
+                const uint8_t duties[6] = {15, 25, 35, 50, 65, 80};
+                g_test_duty_pct = duties[cmd - '1'];
+                printf("\r\n>>> [DUTY SET] Test Duty = %u%% (CCR1=%u/800)\r\n",
+                       g_test_duty_pct,
+                       (unsigned int)(((PWM_ARR_MAX + 1U) * g_test_duty_pct) / 100U));
+            }
+        }
+
+        if ((g_system_millis - last_print) >= 1000) {
+            last_print = g_system_millis;
+            printf("[STATUS] Motor: %s | Last Dir: %s | Duty Preset: %2u%% (20kHz)\r\n",
+                   g_motor_running ? "RUNNING" : "IDLE   ",
+                   g_motor_dir ? "RIGHT(FWD)" : "LEFT (REV)",
+                   g_test_duty_pct);
+        }
+    }
+}
+```
+
+---
+
+### 8.7 Step 05-2 실측 검증 결과
+
+1. **모터 구동 검증 (`DRV8876` + IP570 12V DC 모터)**:
+   - `25%` 듀티에서는 기구물 정지 마찰력(Stiction)으로 인해 정지 상태 유지 $\rightarrow$ **`50%` 듀티(`4`번 키)** 상향 시 안정적으로 기동하고 `250ms` 후 깔끔하게 정지함.
    - **`f` (`PB0 = 1`) $\rightarrow$ 카트 오른쪽 이동**, **`b` (`PB0 = 0`) $\rightarrow$ 카트 왼쪽 이동** 확인 완료.
-2. **동시 계측된 센서 응답 확인**:
-   - **카트 엔코더 (`PC6/PC7`, `TIM3` 4체배)**:
-     - 가장 오른쪽(`-7439`) ↔ 가장 왼쪽(`-1160`) = **총 `6,279` 카운트 / `385 mm` ($\approx 16.3\text{ counts/mm}$)**, 정지 상태 노이즈 `0` 확인.
-     - 참고: 현재 배선 극성 기준 오른쪽 이동 시 카운트 감소(`-`)하므로 Step 06에서 `TIM3_CCER` 극성 반전으로 `오른쪽 = +방향`으로 통일 예정.
-   - **진자 각도 센서 (`WDD35D4-5K` on `PA1`, `ADC1_IN2`)**:
-     - 수직 아래(6시): `~1024 (0.82V)`, 수직 위(12시): `~3140 (2.53V)` ($\approx 11.75\text{ counts/deg}$) 확인.
-     - 수직 위(`3140`) 부근 ±50° 이상이 15° 불감대와 떨어져 있어 균형 제어에 적합한 선형 구간임을 확인 완료.
+   - `20 kHz` PWM 적용으로 구동 시 날카로운 스위칭 고주파 소음(`삐~`) 없이 매끄럽게 구동됨을 확인.
+2. **예비 하드웨어 배선 동시 점검 (Step 06 준비)**:
+   - **카트 엔코더 (`PC6/PC7`, `TIM3` 4체배)**: 레일 전체 스트로크(`385 mm`)에서 총 `6,279` 카운트(`-7439 ~ -1160`, $\approx 16.3\text{ counts/mm}$) 및 정지 상태 노이즈 `0` 확인.
+   - **진자 각도 센서 (`WDD35D4-5K` on `PA1`, `ADC1_IN2`)**: 수직 아래(6시) `~1024 (0.82V)`, 수직 위(12시) `~3140 (2.53V)` ($\approx 11.75\text{ counts/deg}$) 선형 구간 확인.
