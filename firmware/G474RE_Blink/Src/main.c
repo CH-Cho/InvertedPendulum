@@ -189,16 +189,16 @@ static float             s_th_hist[DIFF_WIN_SIZE];
 static uint8_t           s_hist_idx           = 0;
 static volatile uint8_t  s_hist_reset_req     = 1;
 
-// LQR / PD 제어 상태 및 튜닝 가능한 게인 (IP570 Python LQR 도출 초기값)
+// LQR / PD 제어 상태 및 튜닝 가능한 게인 (실물 밸런싱 로그 기반 K_th 우선 튜닝값)
 // u = -(kx*x + kdx*dx + kth*th + kdth*dth),  x=[m, m/s, rad, rad/s], u in [-1, +1]
 static volatile ControlState   g_ctrl_state   = CTRL_IDLE;
 static volatile ControlMode    g_ctrl_mode    = MODE_LQR;
 static volatile TuneParamIndex g_tune_idx     = TUNE_KTH;
-static volatile float          g_k_x          = -3.873f;
-static volatile float          g_k_dx         = -6.411f;
-static volatile float          g_k_th         = -20.759f;
-static volatile float          g_k_dth        = -3.362f;
-static volatile float          g_deadzone_pct = 26.0f;
+static volatile float          g_k_x          = -1.200f;
+static volatile float          g_k_dx         = -2.800f;
+static volatile float          g_k_th         = -28.000f;
+static volatile float          g_k_dth        = -4.500f;
+static volatile float          g_deadzone_pct = 20.0f;
 static volatile float          g_last_u_cmd   = 0.0f;
 static volatile uint16_t       g_arm_hold_ms  = 0;
 static volatile uint8_t        g_fall_trip    = 0;
@@ -361,7 +361,7 @@ static void motor_apply_control(float u)
     g_last_u_cmd = u;
 
     float abs_u = (u >= 0.0f) ? u : -u;
-    if (abs_u < 0.015f) {
+    if (abs_u < 0.035f) {
         TIM2_CCR1 = 0U;
         g_telem_u_pct = 0;
         return;
