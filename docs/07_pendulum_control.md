@@ -297,9 +297,14 @@ typedef enum {
     TUNE_KDX,
     TUNE_KTH,
     TUNE_KDTH,
+    TUNE_KIX,
     TUNE_DEADZONE,
     TUNE_COUNT
 } TuneParamIndex;
+
+static const char * const k_tune_names[TUNE_COUNT] = {
+    "Kx", "Kdx", "Kth", "Kdth", "Kix", "Deadzone%"
+};
 
 // 시스템 틱 및 UART 명령
 static volatile uint32_t g_system_millis      = 0;
@@ -329,21 +334,24 @@ static volatile int32_t  g_angle_zero_adc     = POT_DEFAULT_UPRIGHT;
 static volatile int32_t  g_pot_180_counts     = POT_DEFAULT_180_COUNTS;
 static volatile int8_t   g_pot_up_dir_sign    = 1;
 static volatile uint16_t g_angle_adc_raw      = POT_DEFAULT_UPRIGHT;
+static volatile float    g_zero_shift_deg     = 0.0f; // [/] 영점 미세 보정 (±0.1 deg)
 static volatile float    g_theta_rad          = 0.0f;
 static volatile float    g_dtheta_rps         = 0.0f;
 static float             s_th_hist[DIFF_WIN_SIZE];
 static uint8_t           s_hist_idx           = 0;
 static volatile uint8_t  s_hist_reset_req     = 1;
 
-// LQR / PD 제어 상태 및 튜닝 가능한 게인 (저노이즈 필터 + 뱅뱅 방지 부드러운 튜닝값)
-// u = -(kx*x + kdx*dx + kth*th + kdth*dth),  x=[m, m/s, rad, rad/s], u in [-1, +1]
+// LQR / LQI / PD 제어 상태 및 튜닝 가능한 게인 (실물 테스트 기반 채터링 억제 + LQI 적분 보정)
+// u = -(kx*x + kdx*dx + kth*th + kdth*dth + kix*int_x),  x=[m, m/s, rad, rad/s], u in [-1, +1]
 static volatile ControlState   g_ctrl_state   = CTRL_IDLE;
 static volatile ControlMode    g_ctrl_mode    = MODE_LQR;
 static volatile TuneParamIndex g_tune_idx     = TUNE_KTH;
-static volatile float          g_k_x          = -1.000f;
-static volatile float          g_k_dx         = -2.200f;
-static volatile float          g_k_th         = -18.000f;
-static volatile float          g_k_dth        = -2.800f;
+static volatile float          g_k_x          = -1.464f;
+static volatile float          g_k_dx         = -2.662f;
+static volatile float          g_k_th         = -23.958f;
+static volatile float          g_k_dth        = -2.545f;
+static volatile float          g_k_ix         = -1.500f;
+static volatile float          g_int_x        = 0.0f;
 static volatile float          g_deadzone_pct = 18.0f;
 static volatile float          g_last_u_cmd   = 0.0f;
 static volatile uint16_t       g_arm_hold_ms  = 0;
@@ -651,7 +659,8 @@ void TIM6_DACUNDER_IRQHandler(void)
 
     uint16_t adc_raw = adc1_read_pa1_avg16();
     g_angle_adc_raw = adc_raw;
-    float theta_raw = (float)g_angle_sign * ((float)((int32_t)adc_raw - g_angle_zero_adc) * PI_F) / (float)g_pot_180_counts;
+    float theta_raw = ((float)g_angle_sign * ((float)((int32_t)adc_raw - g_angle_zero_adc) * PI_F) / (float)g_pot_180_counts)
+                      - (g_zero_shift_deg * DEG_TO_RAD_F);
 
     // (2) 20ms 슬라이딩 윈도우 미분 + EMA LPF (alpha=0.08 @ 1kHz, fc ~ 13.8 Hz)
     float theta_rad;
@@ -708,10 +717,13 @@ void TIM6_DACUNDER_IRQHandler(void)
             return;
         }
 
-        // u = -(k_th * theta + k_dth * dtheta [+ k_x * x + k_dx * dx])
+        // u = -(k_th * theta + k_dth * dtheta [+ k_x * x + k_dx * dx + k_ix * int_x])
         float u = -(g_k_th * theta_rad + g_k_dth * g_dtheta_rps);
         if (g_ctrl_mode == MODE_LQR) {
-            u -= (g_k_x * pos_m + g_k_dx * g_vel_mps);
+            g_int_x += pos_m * 0.001f;
+            if (g_int_x >  0.35f) g_int_x =  0.35f;
+            if (g_int_x < -0.35f) g_int_x = -0.35f;
+            u -= (g_k_x * pos_m + g_k_dx * g_vel_mps + g_k_ix * g_int_x);
         }
         motor_apply_control(u);
     } else if (g_ctrl_state == CTRL_ARMED) {
@@ -720,6 +732,7 @@ void TIM6_DACUNDER_IRQHandler(void)
         if ((abs_th_deg < CTRL_ARM_ANGLE_DEG) && (abs_pos_mm < CTRL_ARM_POS_MM)) {
             g_arm_hold_ms++;
             if (g_arm_hold_ms >= CTRL_ARM_HOLD_MS) {
+                g_int_x       = 0.0f;
                 g_ctrl_state  = CTRL_BALANCING;
                 g_arm_hold_ms = 0U;
             }
@@ -785,7 +798,8 @@ static void print_menu(void)
     printf("  Balance : c = Arm/Disarm Balance (Lift <4deg to Auto-Start!)    \r\n");
     printf("            m = Mode LQR <-> PD  | p = Flip Angle Sign (+/-)      \r\n");
     printf("            s / Space = EMERGENCY STOP (Always Immediate Cut)     \r\n");
-    printf("  Tuning  : g = Select Gain (Kx/Kdx/Kth/Kdth/DZ) | +/- = Adjust   \r\n");
+    printf("  Tuning  : g = Select Gain (Kx/Kdx/Kth/Kdth/Kix/DZ) | +/- Adjust\r\n");
+    printf("            [/] = Angle Zero Trim (-/+0.10 deg, Drift Fix!)      \r\n");
     printf("  Homing  : h = Cart Homing (R->L->Center) | a = 2-Pt Angle Cal   \r\n");
     printf("            d = 6h Zero | u = 12h Zero | z = Cart Zero | l = Lim  \r\n");
     printf("  Manual  : f/b = 250ms Kick | 1~6 = Kick Duty | ? = Show Menu    \r\n");
@@ -798,7 +812,11 @@ static void print_menu(void)
     print_fixed_3(g_k_th);
     printf(", kdth:");
     print_fixed_3(g_k_dth);
-    printf("] | DZ:%d%% | Sign:%+d\r\n\r\n", (int)g_deadzone_pct, (int)g_angle_sign);
+    printf(", kix:");
+    print_fixed_3(g_k_ix);
+    printf("] | DZ:%d%% | Trim:", (int)g_deadzone_pct);
+    print_fixed_2((int32_t)(g_zero_shift_deg * 100.0f));
+    printf("deg\r\n\r\n");
 }
 
 static void handle_cart_homing_key(void)
@@ -865,6 +883,7 @@ static void handle_angle_cal_key(void)
         g_pot_up_dir_sign = (diff >= 0) ? 1 : -1;
         g_pot_180_counts  = span;
         g_angle_zero_adc  = (int32_t)up_adc;
+        g_zero_shift_deg  = 0.0f;
         s_hist_reset_req  = 1U;
         g_acal_state      = ACAL_IDLE;
         printf("\r\n>>> [ANGLE CAL 완료] 12시=%ld, 실측 180deg=%ld counts\r\n\r\n",
@@ -875,7 +894,6 @@ static void handle_angle_cal_key(void)
 static void adjust_selected_gain(int8_t dir)
 {
     float scale = (dir > 0) ? 1.10f : 0.90909f;
-    const char *names[TUNE_COUNT] = {"Kx", "Kdx", "Kth", "Kdth", "Deadzone%"};
     float new_val = 0.0f;
 
     switch (g_tune_idx) {
@@ -895,6 +913,10 @@ static void adjust_selected_gain(int8_t dir)
         g_k_dth *= scale;
         new_val = g_k_dth;
         break;
+    case TUNE_KIX:
+        g_k_ix *= scale;
+        new_val = g_k_ix;
+        break;
     case TUNE_DEADZONE:
         g_deadzone_pct += (dir > 0) ? 2.0f : -2.0f;
         if (g_deadzone_pct < 0.0f)  g_deadzone_pct = 0.0f;
@@ -905,7 +927,7 @@ static void adjust_selected_gain(int8_t dir)
         break;
     }
 
-    printf("\r\n>>> [TUNE %s] = ", names[g_tune_idx]);
+    printf("\r\n>>> [TUNE %s] = ", k_tune_names[g_tune_idx]);
     print_fixed_3(new_val);
     printf("\r\n");
 }
@@ -998,13 +1020,18 @@ int main(void)
                 printf("\r\n>>> [ANGLE SIGN] %+d (오른쪽 기울임 = + 가 되도록 맞추세요)\r\n",
                        (int)g_angle_sign);
             } else if (cmd == 'g' || cmd == 'G') {
-                const char *names[TUNE_COUNT] = {"Kx", "Kdx", "Kth", "Kdth", "Deadzone%"};
                 g_tune_idx = (TuneParamIndex)((g_tune_idx + 1U) % TUNE_COUNT);
-                printf("\r\n>>> [TUNE SELECT] %s (조절: '+' 또는 '-')\r\n", names[g_tune_idx]);
+                printf("\r\n>>> [TUNE SELECT] %s (조절: '+' 또는 '-')\r\n", k_tune_names[g_tune_idx]);
             } else if (cmd == '+' || cmd == '=') {
                 adjust_selected_gain(1);
             } else if (cmd == '-' || cmd == '_') {
                 adjust_selected_gain(-1);
+            } else if (cmd == '[' || cmd == ']') {
+                g_zero_shift_deg += (cmd == ']') ? 0.10f : -0.10f;
+                s_hist_reset_req = 1U;
+                printf("\r\n>>> [ZERO TRIM] Shift = ");
+                print_fixed_2((int32_t)(g_zero_shift_deg * 100.0f));
+                printf(" deg\r\n");
             } else if (cmd == 'h' || cmd == 'H') {
                 handle_cart_homing_key();
             } else if (cmd == 'a' || cmd == 'A') {
@@ -1023,11 +1050,13 @@ int main(void)
             } else if (cmd == 'd' || cmd == 'D') {
                 g_angle_down_adc = g_angle_adc_raw;
                 g_angle_zero_adc = (int32_t)g_angle_down_adc + (g_pot_up_dir_sign * g_pot_180_counts);
+                g_zero_shift_deg = 0.0f;
                 s_hist_reset_req = 1U;
                 printf("\r\n>>> [6h ZERO] 6시 ADC=%u -> 12시 영점(%ld) 자동 산출\r\n",
                        (unsigned int)g_angle_down_adc, (long)g_angle_zero_adc);
             } else if (cmd == 'u' || cmd == 'U') {
                 g_angle_zero_adc = (int32_t)g_angle_adc_raw;
+                g_zero_shift_deg = 0.0f;
                 s_hist_reset_req = 1U;
                 printf("\r\n>>> [12h ZERO] 12시 영점 ADC=%ld -> +0.00 deg\r\n",
                        (long)g_angle_zero_adc);
