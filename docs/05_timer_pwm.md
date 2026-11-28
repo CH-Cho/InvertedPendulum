@@ -3,9 +3,9 @@
 ## 1. 개요
 도립진자(Inverted Pendulum) 카트의 DC/BLDC 구동 모터에 정밀한 전기적 힘(토크)을 인가하기 위한 **하드웨어 타이머 PWM(Pulse Width Modulation, 펄스 폭 변조)**의 동작 원리를 이해하고 구현합니다.
 
-본 튜토리얼은 두 단계로 나누어 진행되며, 본 문서는 **Step 05-1: TIM2 하드웨어 PWM 기초 및 버튼 스텝 듀티비(0~100%) 제어**를 다룹니다.
-- **Step 05-1 (본 문서)**: TIM2 하드웨어 PWM (1 kHz) + 온보드 LED(`PA5`) 밝기 6단계 조절 + 스코프 관측 핀(`PA0`) 동시 출력 + TIM6 기반 200ms 논블로킹 디바운싱 버튼 제어 + 정수형 mV 시리얼 텔레메트리
-- **Step 05-2 (후속 단계)**: USART2 RX 인터럽트 기반 키보드 실시간 원격 듀티비 제어 (Teleoperation)
+본 튜토리얼은 두 단계로 구성되어 있으며, **Step 05-1 (기초 PWM 및 버튼 제어)**과 **Step 05-2 (실전 Pololu #4037 DRV8876 H-Bridge 구동, 20kHz 비가청 PWM 및 UART 원격 조종)**를 모두 포함합니다.
+- **Step 05-1**: TIM2 하드웨어 PWM (1 kHz) + 온보드 LED(`PA5`) 밝기 6단계 조절 + 스코프 관측 핀(`PA0`) 동시 출력 + TIM6 기반 200ms 논블로킹 디바운싱 버튼 제어 + 정수형 mV 시리얼 텔레메트리
+- **Step 05-2**: `20kHz` 비가청 대역 PWM 업그레이드 + Pololu #4037 (`DRV8876`) PH/EN 모드 정/역회전 제어(`PA0`, `PB0`) + `USART2 RX` 인터럽트 키보드 조종 & `250ms` 안전 펄스 킥(Pulse Kick) + IP570 하드웨어 통합 검증
 
 ---
 
@@ -439,3 +439,79 @@ int main(void)
    ```
 3. **오실로스코프 / 테스터기 관측 핀 (`PA0`, 아두이노 `A0`)**:
    - `PA0` 핀과 인접 `GND` 핀 사이의 전압을 측정했을 때, 이론치 계산값($0.00\text{V} \rightarrow 0.66\text{V} \rightarrow 1.32\text{V} \dots \rightarrow 3.30\text{V}$)과 정확히 일치하는 직류 환산 평균 전압 및 $1\text{kHz}$ 사각파 펄스 폭 확인.
+
+---
+
+## 8. [Step 05-2] 실전 H-Bridge 모터 구동 (`DRV8876`), 20kHz PWM & 키보드 원격 조종
+
+### 8.1 왜 20 kHz 비가청(Ultrasonic) PWM을 사용하는가?
+- 사람의 가청 주파수 대역은 **20 Hz ~ 20 kHz**입니다.
+- Step 05-1에서 사용한 `1 kHz` PWM으로 실제 DC 모터를 구동하면 모터 코일과 철심이 $1\,\text{kHz}$로 진동하면서 날카로운 **"삐~" 하는 전자음(Switching Whine)**이 발생합니다.
+- 따라서 실전 모터 제어에서는 PWM 주파수를 가청 대역 경계 밖인 **$20\,\text{kHz}$ 이상**(주기 $50\,\mu\text{s}$)으로 설정해 소음을 제거하고 전류 리플을 줄입니다.
+
+$$\text{PSC} = 0, \quad \text{ARR} = 799 \quad \Longrightarrow \quad f_{\text{PWM}} = \frac{16,000,000\text{ Hz}}{(0 + 1) \times (799 + 1)} = \mathbf{20,000\text{ Hz} \, (20\text{ kHz})}$$
+
+---
+
+### 8.2 Pololu #4037 (`DRV8876`) H-Bridge `PH/EN` 제어 및 실물 회로도
+
+실제 제작한 만능기판 쉴드의 전체 핀맵과 회로도는 다음 문서를 참조합니다:
+- **전체 핀맵 정밀 회로도**: [inverted_pendulum_full_schematic.png](images/inverted_pendulum_full_schematic.png)
+- **실물 사진 대조 핀맵**: [inverted_pendulum_real_hardware_pinmap.png](images/inverted_pendulum_real_hardware_pinmap.png)
+
+| #4037 핀 (`PH/EN` 모드) | 연결 대상 | 기능 및 상태 |
+| :--- | :--- | :--- |
+| **L5 (`PMODE`) $\leftrightarrow$ L2 (`GND■`)** | 보드 바닥면 납땜 쇼트 | **`PH/EN` 2선 제어 모드** 하드웨어 고정 |
+| **L6 (`nSLEEP`)** | NUCLEO `3V3` (`CN7-16`) | 내부 `10kΩ` 풀다운 해제 (상시 Wakeup) |
+| **L3 (`EN/IN1`)** | NUCLEO `PA0` (`CN7-28 / A0`) | `TIM2_CH1` **20 kHz PWM** 속도 입력 |
+| **L4 (`PH/IN2`)** | NUCLEO `PB0` (`CN7-34 / A3`) | `GPIO Output` 회전 방향 제어 (`1`=오른쪽 `f`, `0`=왼쪽 `b`) |
+| **R1 (`VIN`) / R2 (`GND■`)** | 외부 12V 전원 (`J1` + `100uF C1`) | 모터 구동 주전원 인입 (역기전력 필터링) |
+| **R3 (`OUT1`) / R4 (`OUT2`)** | IP570 모터 6P (`1번 +`, `6번 -`) | 양방향 H-Bridge 모터 구동 출력 |
+
+#### `PH/EN` 모드 (`PMODE = LOW`) 진리표
+| `EN (PA0)` | `PH (PB0)` | `OUT1` | `OUT2` | 모터 동작 (IP570 실측 기준) |
+| :---: | :---: | :---: | :---: | :--- |
+| `0` | `X` | `LOW` | `LOW` | **Brake Low (즉시 전기적 제동 정지)** |
+| `PWM` | `1` | `PWM (H/L)` | `LOW` | **정회전 (`f`) $\rightarrow$ 카트 오른쪽 이동** |
+| `PWM` | `0` | `LOW` | `PWM (H/L)` | **역회전 (`b`) $\rightarrow$ 카트 왼쪽 이동** |
+
+---
+
+### 8.3 STM32G474RE 데이터시트 검증 핵심 (`5V` 내성: `FT` vs `TT_a`)
+NUCLEO-G474RE(`DS12288`) 핀 정의표 검증 결과, G474 시리즈는 내장 OPAMP/DAC 때문에 `PA6(D12)`, `PA7(D11)`을 포함한 18개 헤더 핀이 **`TT_a` (3.3V 전용, 최대 3.6V)**입니다.
+따라서 `5V` 홀 엔코더를 직결하는 `TIM3` 핀은 **5V 내성(`FT`)이 보장되면서 동일한 `TIM3` 하드웨어 엔코더를 지원하는 `PC6 (CN10-4)` 및 `PC7 (D9 / CN10-19)`**을 사용합니다.
+
+---
+
+### 8.4 USART2 RX 인터럽트 (`IRQ 38`) 및 안전 펄스 킥 구현 핵심
+
+1. **`USART2_RX` 인터럽트 & Overrun(ORE) 방어**:
+   ```c
+   void USART2_IRQHandler(void)
+   {
+       if (USART2_ISR & (1U << 3)) {
+           USART2_ICR = (1U << 3); // ORE(Overrun Error) 클리어 -> 수신 멈춤 방지
+       }
+       if (USART2_ISR & (1U << 5)) { // RXNE
+           g_rx_cmd = (uint8_t)USART2_RDR;
+       }
+   }
+   ```
+2. **레일 충돌 방지용 `250ms` 자동 정지 안전 킥**:
+   - `TIM6` 1ms ISR에서 `g_motor_running` 상태를 감시하다가 `250ms`가 경과하면 자동으로 `TIM2_CCR1 = 0`을 인가해 정지시킵니다.
+   - 키보드 `f` / `b`로 짧은 펄스 구동 테스트, `1`~`6`으로 듀티(`15% ~ 80%`) 조절, `s`/`Space`로 즉시 비상 정지를 수행합니다.
+
+---
+
+### 8.5 Step 05-2 및 전체 하드웨어 통합 검증 결과
+
+1. **모터 구동 검증 (`DRV8876` + IP570)**:
+   - `25%` 듀티에서는 기구물 정지 마찰력(Stiction)이 커서 정지 상태 유지 $\rightarrow$ `50%` 듀티(`4`번 키) 상향 시 안정적 기동 확인.
+   - **`f` (`PB0 = 1`) $\rightarrow$ 카트 오른쪽 이동**, **`b` (`PB0 = 0`) $\rightarrow$ 카트 왼쪽 이동** 확인 완료.
+2. **동시 계측된 센서 응답 확인**:
+   - **카트 엔코더 (`PC6/PC7`, `TIM3` 4체배)**:
+     - 가장 오른쪽(`-7439`) ↔ 가장 왼쪽(`-1160`) = **총 `6,279` 카운트 / `385 mm` ($\approx 16.3\text{ counts/mm}$)**, 정지 상태 노이즈 `0` 확인.
+     - 참고: 현재 배선 극성 기준 오른쪽 이동 시 카운트 감소(`-`)하므로 Step 06에서 `TIM3_CCER` 극성 반전으로 `오른쪽 = +방향`으로 통일 예정.
+   - **진자 각도 센서 (`WDD35D4-5K` on `PA1`, `ADC1_IN2`)**:
+     - 수직 아래(6시): `~1024 (0.82V)`, 수직 위(12시): `~3140 (2.53V)` ($\approx 11.75\text{ counts/deg}$) 확인.
+     - 수직 위(`3140`) 부근 ±50° 이상이 15° 불감대와 떨어져 있어 균형 제어에 적합한 선형 구간임을 확인 완료.
