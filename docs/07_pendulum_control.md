@@ -576,15 +576,19 @@ static void adc1_pa1_init(void)
 
     ADC1_CR &= ~(1U << 29); // DEEPPWD = 0
     ADC1_CR |=  (1U << 28); // ADVREGEN = 1
-    delay_ms(2);
+    for (volatile uint32_t i = 0U; i < 40000U; i++) {
+        __asm volatile ("nop"); // 레귤레이터 안정화 대기 (> 20us, TIM6 시작 전 독립 대기)
+    }
 
     ADC1_CR &= ~(1U << 30); // ADCALDIF = 0
     ADC1_CR |=  (1U << 31); // ADCAL = 1
-    while (ADC1_CR & (1U << 31));
+    uint32_t cal_to = 100000U;
+    while ((ADC1_CR & (1U << 31)) && (--cal_to > 0U));
 
     ADC1_ISR = (1U << 0);
     ADC1_CR |= (1U << 0);   // ADEN = 1
-    while (!(ADC1_ISR & (1U << 0)));
+    uint32_t rdy_to = 100000U;
+    while (!(ADC1_ISR & (1U << 0)) && (--rdy_to > 0U));
 
     ADC1_CFGR  = 0U;
     ADC1_SMPR1 &= ~(7U << 6);
@@ -886,11 +890,11 @@ static void adjust_selected_gain(int8_t dir)
 int main(void)
 {
     fpu_enable();
-    tim6_init();
     uart2_init();
     motor_driver_init();
     encoder_tim3_init();
     adc1_pa1_init();
+    tim6_init(); // 반드시 모든 센서(ADC1/TIM3) 초기화 완료 후 마지막에 1kHz 제어 루프 시작!
     delay_ms(5); // 1kHz ISR이 초기 ADC 샘플 및 링버퍼 채울 시간 대기
 
     print_menu();
