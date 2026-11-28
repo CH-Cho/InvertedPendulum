@@ -251,7 +251,7 @@ tim6_init();       // 모든 주변장치 준비 완료 후 마지막에 1kHz �
 #define RAIL_TRAVEL_M           0.385f
 #define RAIL_TRAVEL_MM          385
 #define DEFAULT_TOTAL_COUNTS    6279
-#define SOFT_LIMIT_MM           150.0f
+#define SOFT_LIMIT_MM           165.0f
 #define HOME_CENTER_BAND_CNT    50
 #define HOME_CENTER_TIMEOUT_MS  4000U
 
@@ -346,11 +346,11 @@ static volatile uint8_t  s_hist_reset_req     = 1;
 static volatile ControlState   g_ctrl_state   = CTRL_IDLE;
 static volatile ControlMode    g_ctrl_mode    = MODE_LQR;
 static volatile TuneParamIndex g_tune_idx     = TUNE_KTH;
-static volatile float          g_k_x          = -1.610f;
-static volatile float          g_k_dx         = -2.928f;
-static volatile float          g_k_th         = -28.989f;
-static volatile float          g_k_dth        = -3.388f;
-static volatile float          g_k_ix         = -0.435f;
+static volatile float          g_k_x          = -1.464f;
+static volatile float          g_k_dx         = -3.221f;
+static volatile float          g_k_th         = -26.354f;
+static volatile float          g_k_dth        = -2.545f;
+static volatile float          g_k_ix         = -0.350f;
 static volatile float          g_int_x        = 0.0f;
 static volatile float          g_deadzone_pct = 18.0f;
 static volatile float          g_last_u_cmd   = 0.0f;
@@ -892,44 +892,28 @@ static void handle_angle_cal_key(void)
     }
 }
 
+static volatile float * const k_tune_ptrs[TUNE_COUNT] = {
+    &g_k_x, &g_k_dx, &g_k_th, &g_k_dth, &g_k_ix, &g_deadzone_pct
+};
+
+static void print_selected_gain(const char *tag)
+{
+    printf("\r\n>>> [%s] %s = ", tag, k_tune_names[g_tune_idx]);
+    print_fixed_3(*k_tune_ptrs[g_tune_idx]);
+}
+
 static void adjust_selected_gain(int8_t dir)
 {
-    float scale = (dir > 0) ? 1.10f : 0.90909f;
-    float new_val = 0.0f;
-
-    switch (g_tune_idx) {
-    case TUNE_KX:
-        g_k_x *= scale;
-        new_val = g_k_x;
-        break;
-    case TUNE_KDX:
-        g_k_dx *= scale;
-        new_val = g_k_dx;
-        break;
-    case TUNE_KTH:
-        g_k_th *= scale;
-        new_val = g_k_th;
-        break;
-    case TUNE_KDTH:
-        g_k_dth *= scale;
-        new_val = g_k_dth;
-        break;
-    case TUNE_KIX:
-        g_k_ix *= scale;
-        new_val = g_k_ix;
-        break;
-    case TUNE_DEADZONE:
+    if (g_tune_idx == TUNE_DEADZONE) {
         g_deadzone_pct += (dir > 0) ? 2.0f : -2.0f;
         if (g_deadzone_pct < 0.0f)  g_deadzone_pct = 0.0f;
         if (g_deadzone_pct > 50.0f) g_deadzone_pct = 50.0f;
-        new_val = g_deadzone_pct;
-        break;
-    default:
-        break;
+    } else {
+        float scale = (dir > 0) ? 1.10f : 0.90909f;
+        *k_tune_ptrs[g_tune_idx] *= scale;
     }
 
-    printf("\r\n>>> [TUNE %s] = ", k_tune_names[g_tune_idx]);
-    print_fixed_3(new_val);
+    print_selected_gain("TUNE");
     printf("\r\n");
 }
 
@@ -1038,7 +1022,8 @@ int main(void)
                        (int)g_angle_sign);
             } else if (cmd == 'g' || cmd == 'G') {
                 g_tune_idx = (TuneParamIndex)((g_tune_idx + 1U) % TUNE_COUNT);
-                printf("\r\n>>> [TUNE SELECT] %s (조절: '+' 또는 '-')\r\n", k_tune_names[g_tune_idx]);
+                print_selected_gain("TUNE SELECT");
+                printf(" (조절: '+' 또는 '-')\r\n");
             } else if (cmd == '+' || cmd == '=') {
                 adjust_selected_gain(1);
             } else if (cmd == '-' || cmd == '_') {
